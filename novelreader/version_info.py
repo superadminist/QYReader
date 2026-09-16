@@ -6,6 +6,14 @@ APP_NAME = "启远阅读"
 # 最新版本在前。每次发版时在此追加新条目，并同步更新 novelreader/__init__.py 的 __version__。
 VERSION_HISTORY = [
     {
+        "version": "2.1.0",
+        "date": "2026-09-16",
+        "changes": [
+            "正文支持在任意位置单击或选中文字后设置朗读起点",
+            "播放时精确从选定字符偏移开始，并继续共用唯一 SpeechController",
+        ],
+    },
+    {
         "version": "2.0.10",
         "date": "2026-09-16",
         "changes": [

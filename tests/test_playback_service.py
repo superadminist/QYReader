@@ -642,6 +642,18 @@ class PlaybackServiceTests(unittest.TestCase):
 
 
 class SpeechControllerContractTests(unittest.TestCase):
+    def test_next_chunk_starts_at_an_arbitrary_character_offset(self):
+        content = "第一句可以从这里继续朗读。第二句。"
+        offset = content.index("这里")
+
+        text, next_offset, relative_start = SpeechController._next_chunk(
+            content, offset
+        )
+
+        self.assertEqual(text, "这里继续朗读。")
+        self.assertEqual(relative_start, 0)
+        self.assertEqual(next_offset, content.index("。", offset) + 1)
+
     @staticmethod
     def _wait_for_stop(controller, timeout=2.0):
         deadline = time.time() + timeout

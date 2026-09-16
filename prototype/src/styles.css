@@ -225,6 +225,8 @@ h1, h2, p { margin-top: 0; }
 .paragraph-mode-3 .reading-copy > div { display: inline; }
 .paragraph-mode-3 .reader-text-block { display: inline; margin: 0; }
 .reader-text-block mark { margin: 0 -3px; padding: 2px 3px; border-radius: 5px; color: inherit; background: #fff0b9; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.reader-start-marker { display: inline-block; width: 0; height: 1.22em; margin-inline: -1px 1px; border-left: 2px solid #5f6fd3; vertical-align: -.22em; pointer-events: none; animation: reader-start-pulse 1.35s ease-in-out infinite; }
+@keyframes reader-start-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .38; } }
 .reader-window-loading { position: sticky; z-index: 2; top: 0; margin-bottom: 12px; padding: 8px 12px; border-radius: 8px; color: #5965be; background: rgba(237,239,255,.94); text-align: center; font-size: 11px; }
 .window-load-button { width: 100%; margin: 4px 0 18px; padding: 9px; border: 1px solid #e1e5ed; border-radius: 9px; color: #6570c8; background: #f7f8fc; cursor: pointer; }
 .reader-message { place-items: center; grid-template-rows: 1fr; }

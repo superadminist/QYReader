@@ -19,6 +19,45 @@ import {
 } from "../src/floatingSettings.js";
 import { windowControlPresentation } from "../src/windowControls.js";
 import { shouldApplyAudioWindow, windowContainsSentence } from "../src/readerWindowSync.js";
+import { readerPositionFromRange } from "../src/readerPosition.js";
+
+test("reader text range resolves an exact Unicode character offset", () => {
+  const block = {
+    nodeType: 1,
+    dataset: { startOffset: "20" },
+    textContent: "甲😀乙丙",
+    closest: () => block,
+  };
+  const textNode = { nodeType: 3, parentElement: block };
+  const root = {
+    contains: (node) => node === block,
+    ownerDocument: {
+      createRange: () => ({
+        selectNodeContents() {},
+        setEnd() {},
+        toString: () => "甲😀",
+      }),
+    },
+  };
+
+  assert.deepEqual(readerPositionFromRange(root, {
+    startContainer: textNode,
+    startOffset: 3,
+  }, 4), {
+    kind: "position",
+    chapterIndex: 4,
+    charOffset: 22,
+  });
+});
+
+test("reader text range rejects a selection outside the reading copy", () => {
+  const outside = { nodeType: 1, closest: () => null };
+  const root = { contains: () => false };
+  assert.equal(readerPositionFromRange(root, {
+    startContainer: outside,
+    startOffset: 0,
+  }, 0), null);
+});
 
 test("audio window ignores stale or wrong-chapter responses", () => {
   const first = { chapterIndex: 0, startOffset: 10 };

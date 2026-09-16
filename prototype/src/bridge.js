@@ -45,7 +45,7 @@ function demoReaderWindow(sessionId, bookId, anchorOffset = 0) {
 }
 
 const EMPTY_DATA = {
-  app: { version: "2.0.7" },
+  app: { version: "2.1.0" },
   library: { books: [], total: 0 },
   preferences: { theme: "护眼", colorScheme: "light", autoOpenLast: true, closeToTray: false, autoCheckUpdates: true, startupBookId: "" },
   window: { isMaximized: false, isFullScreen: false },
@@ -60,7 +60,7 @@ const EMPTY_DATA = {
   },
   softwareUpdate: {
     status: "idle",
-    currentVersion: "2.0.7",
+    currentVersion: "2.1.0",
     latestVersion: "",
     lastCheckedAt: "",
     message: "尚未检查更新。",
