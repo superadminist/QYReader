@@ -1543,7 +1543,10 @@ class SpeechControllerContractTests(unittest.TestCase):
                 return engine
 
         main_thread = threading.get_ident()
-        with mock.patch("novelreader.tts_engine.pyttsx3", FakePyttsx3):
+        with (
+            mock.patch("novelreader.tts_engine.pyttsx3", FakePyttsx3),
+            mock.patch("novelreader.tts_engine._install_sapi_stream_events"),
+        ):
             controller = SpeechController()
             original_post = controller._post
 
