@@ -232,6 +232,49 @@ class PlaybackServiceTests(unittest.TestCase):
         self.assertEqual([event["reason"] for event in replayed], ["sentenceStart"])
         self.assertEqual(replayed[0]["playback"]["sentence"]["text"], "第一句。")
 
+    def test_pause_freezes_queued_fallback_audio_start_before_ui_poll(self):
+        self.speech._backend = "edge"
+        self.service.control("play", "play-edge")
+        generation = self.speech.generation()
+        self.speech.emit({
+            "type": "error", "generation": generation,
+            "code": "EDGE_OFFLINE_FALLBACK", "fallback_backend": "sapi",
+        })
+        self.speech.emit({
+            "type": "sentence_start", "generation": generation,
+            "chapter_idx": 0, "char_offset": 0, "char_end": 4,
+            "text": "第一句。",
+        })
+        self.service.drain_events()
+
+        # Audio start reached the controller, but Qt has not polled it yet.
+        # This is the click shown in the user's recording.
+        self.speech.emit({
+            "type": "sentence_start", "generation": generation,
+            "chapter_idx": 0, "char_offset": 4, "char_end": 8,
+            "text": "第二句！",
+        })
+        self.service.control("pause", "pause-fallback")
+        paused_events = self.service.drain_events()
+        self.assertEqual([event["reason"] for event in paused_events], ["state"])
+        self.assertEqual(paused_events[0]["playback"]["status"], "paused")
+        self.assertEqual(paused_events[0]["playback"]["sentence"]["text"], "第一句。")
+        self.assertEqual(self.service.floating_context()["current"]["text"], "第一句。")
+
+        self.service.control("play", "resume-fallback")
+        resumed_events = self.service.drain_events()
+        self.assertEqual([event["reason"] for event in resumed_events], ["state"])
+        self.assertEqual(resumed_events[0]["playback"]["sentence"]["text"], "第一句。")
+        self.speech.emit({
+            "type": "sentence_start", "generation": generation,
+            "chapter_idx": 0, "char_offset": 4, "char_end": 8,
+            "text": "第二句！",
+        })
+        confirmed = self.service.drain_events()
+        self.assertEqual([event["reason"] for event in confirmed], ["sentenceStart"])
+        self.assertEqual(confirmed[0]["playback"]["sentence"]["text"], "第二句！")
+        self.assertEqual(self.service.floating_context()["current"]["text"], "第二句！")
+
     def test_pause_and_resume_after_done_keep_both_surfaces_until_audio_starts(self):
         self.service.control("play", "play-1")
         generation = self.speech.generation()
@@ -692,7 +735,7 @@ class SpeechControllerContractTests(unittest.TestCase):
             def iterate(self):
                 if not self.started:
                     self.started = True
-                    self.callbacks["started-word"](name=self.name)
+                    self.callbacks["started-word"](name="第一", location=0, length=2)
                 if len(self.spoken) > 1:
                     self.callbacks["finished-utterance"](
                         name=self.name, completed=True
@@ -751,6 +794,197 @@ class SpeechControllerContractTests(unittest.TestCase):
             self.assertNotIn("error", [event["reason"] for event in seen])
         finally:
             release_return.set()
+            service.shutdown()
+
+    def test_fallback_audio_start_queued_before_pause_does_not_jump_either_surface(self):
+        controller = SpeechController()
+        controller.set_voice("zh-CN-XiaoxiaoNeural")
+        controller.set_sentence_gap(0)
+        controller._edge_synthesize = lambda text: None
+        controller._sync_props = lambda: None
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        release_second = threading.Event()
+        second_stopped = threading.Event()
+
+        class BoundaryEngine:
+            def __init__(self):
+                self.callbacks = {}
+                self.spoken = []
+                self.name = None
+                self.started = False
+
+            def connect(self, topic, callback):
+                self.callbacks[topic] = callback
+                return topic
+
+            def disconnect(self, topic):
+                self.callbacks.pop(topic, None)
+
+            def say(self, text, name=None):
+                self.spoken.append(text)
+                self.name = name
+                self.started = False
+
+            def iterate(self):
+                if self.started:
+                    return
+                self.started = True
+                self.callbacks["started-word"](name="第一", location=0, length=2)
+                if len(self.spoken) == 1:
+                    first_started.set()
+                    release_first.wait(1)
+                    self.callbacks["finished-utterance"](name=self.name, completed=True)
+                elif len(self.spoken) == 2:
+                    second_started.set()
+                    release_second.wait(1)
+                else:
+                    self.callbacks["finished-utterance"](name=self.name, completed=True)
+
+            def stop(self):
+                if len(self.spoken) == 2:
+                    self.callbacks["finished-utterance"](name=self.name, completed=False)
+                    second_stopped.set()
+
+        engine = BoundaryEngine()
+        controller._engine = engine
+        service = PlaybackService(controller)
+        service.bind_session("session", "book", make_book("第一句。第二句！", ""))
+        try:
+            service.control("play", "start")
+            self.assertTrue(first_started.wait(1))
+            started = service.drain_events()
+            self.assertEqual(
+                [event["playback"]["sentence"]["text"] for event in started
+                 if event["reason"] == "sentenceStart"], ["第一句。"],
+            )
+            release_first.set()
+            self.assertTrue(second_started.wait(1))
+
+            # The next utterance has begun but Qt has not consumed its event.
+            service.control("pause", "pause-before-poll")
+            paused = service.drain_events()
+            self.assertNotIn("sentenceStart", [event["reason"] for event in paused])
+            self.assertEqual(paused[-1]["playback"]["status"], "paused")
+            self.assertEqual(paused[-1]["playback"]["sentence"]["text"], "第一句。")
+            self.assertEqual(service.floating_context()["current"]["text"], "第一句。")
+
+            release_second.set()
+            self.assertTrue(second_stopped.wait(1))
+            service.control("play", "resume")
+            self.assertEqual(service.drain_events()[-1]["playback"]["sentence"]["text"], "第一句。")
+            deadline = time.time() + 1
+            heard = []
+            while time.time() < deadline and not any(
+                event["reason"] == "sentenceStart" for event in heard
+            ):
+                heard.extend(service.drain_events())
+                time.sleep(0.005)
+            self.assertEqual(engine.spoken, ["第一句。", "第二句！", "第二句！"])
+            self.assertEqual(
+                [event["playback"]["sentence"]["text"] for event in heard
+                 if event["reason"] == "sentenceStart"], ["第二句！"],
+            )
+        finally:
+            release_first.set()
+            release_second.set()
+            service.shutdown()
+
+    def test_local_sapi_pause_before_first_word_keeps_both_surfaces_on_last_audible_sentence(self):
+        controller = SpeechController()
+        controller.set_sentence_gap(0)
+        controller._sync_props = lambda: None
+        first_word = threading.Event()
+        second_stream = threading.Event()
+        release_second = threading.Event()
+        second_stopped = threading.Event()
+        third_stream = threading.Event()
+        release_third = threading.Event()
+
+        class StreamBeforeWordEngine:
+            def __init__(self):
+                self.callbacks = {}
+                self.spoken = []
+                self.name = None
+                self.started = False
+
+            def connect(self, topic, callback):
+                self.callbacks[topic] = callback
+                return topic
+
+            def disconnect(self, topic):
+                self.callbacks.pop(topic, None)
+
+            def say(self, text, name=None):
+                self.spoken.append(text)
+                self.name = name
+                self.started = False
+
+            def iterate(self):
+                if self.started:
+                    return
+                self.started = True
+                self.callbacks["started-word"](name=self.name, location=1, length=0)
+                if len(self.spoken) == 2:
+                    second_stream.set()
+                    release_second.wait(1)
+                    return
+                if len(self.spoken) == 3:
+                    third_stream.set()
+                    release_third.wait(1)
+                self.callbacks["started-word"](name="词", location=0, length=1)
+                if len(self.spoken) == 1:
+                    first_word.set()
+                self.callbacks["finished-utterance"](name=self.name, completed=True)
+
+            def stop(self):
+                if len(self.spoken) == 2:
+                    self.callbacks["finished-utterance"](name=self.name, completed=False)
+                    second_stopped.set()
+
+        engine = StreamBeforeWordEngine()
+        controller._engine = engine
+        service = PlaybackService(controller)
+        service.bind_session("session", "book", make_book("第一句。第二句！", ""))
+        try:
+            service.control("play", "local-start")
+            self.assertTrue(first_word.wait(1))
+            self.assertTrue(second_stream.wait(1))
+            starts = [event for event in service.drain_events()
+                      if event["reason"] == "sentenceStart"]
+            self.assertEqual([event["playback"]["sentence"]["text"]
+                              for event in starts], ["第一句。"])
+
+            service.control("pause", "pause-before-next-word")
+            paused = service.drain_events()
+            self.assertNotIn("sentenceStart", [event["reason"] for event in paused])
+            self.assertEqual(paused[-1]["playback"]["status"], "paused")
+            self.assertEqual(paused[-1]["playback"]["sentence"]["text"], "第一句。")
+            self.assertEqual(service.floating_context()["current"]["text"], "第一句。")
+
+            release_second.set()
+            self.assertTrue(second_stopped.wait(1))
+            service.control("play", "local-resume")
+            resumed = service.drain_events()
+            self.assertEqual(resumed[-1]["playback"]["sentence"]["text"], "第一句。")
+            self.assertTrue(third_stream.wait(1))
+            self.assertEqual(service.snapshot()["sentence"]["text"], "第一句。")
+            release_third.set()
+            deadline = time.time() + 1
+            heard = []
+            while time.time() < deadline and not any(
+                event["reason"] == "sentenceStart" for event in heard
+            ):
+                heard.extend(service.drain_events())
+                time.sleep(0.005)
+            self.assertEqual(engine.spoken, ["第一句。", "第二句！", "第二句！"])
+            self.assertEqual([event["playback"]["sentence"]["text"]
+                              for event in heard if event["reason"] == "sentenceStart"],
+                             ["第二句！"])
+        finally:
+            release_second.set()
+            release_third.set()
             service.shutdown()
 
     def test_edge_failure_is_structured_and_falls_back(self):
@@ -964,13 +1198,14 @@ class SpeechControllerContractTests(unittest.TestCase):
         self.assertEqual([entry["type"] for entry in events], ["error"])
         self.assertEqual(events[0]["code"], "SAPI_PLAYBACK_FAILED")
 
-    def test_sapi_highlight_waits_for_audio_stream_not_queued_speak(self):
+    def test_sapi_highlight_waits_for_first_word_not_early_stream(self):
         controller = SpeechController()
         controller._book = make_book()
         controller._state = "playing"
         controller._gen = 5
         controller._sync_props = lambda: None
         before_audio = []
+        before_word = []
 
         class StreamEngine:
             def __init__(self):
@@ -994,7 +1229,15 @@ class SpeechControllerContractTests(unittest.TestCase):
                     # SAPI started-utterance is sent before its async Speak.
                     before_audio.extend(controller.drain())
                 else:
-                    self.callbacks["started-word"](name=self.name)
+                    # pyttsx3 calls this topic once for SAPI StartStream,
+                    # then again for each actual Word. The stream is early.
+                    self.callbacks["started-word"](
+                        name=self.name, location=1, length=0,
+                    )
+                    before_word.extend(controller.drain())
+                    self.callbacks["started-word"](
+                        name="第一", location=0, length=2,
+                    )
                     self.callbacks["finished-utterance"](
                         name=self.name, completed=True
                     )
@@ -1006,9 +1249,118 @@ class SpeechControllerContractTests(unittest.TestCase):
         event = {"type": "sentence_start", "text": "第一句。"}
         self.assertTrue(controller._speak_sapi("第一句。", 5, event))
         self.assertEqual(before_audio, [])
+        self.assertEqual(before_word, [])
         self.assertEqual(
             [entry["type"] for entry in controller.drain()], ["sentence_start"]
         )
+
+    def test_sapi_ignores_old_stream_events_labeled_as_next_sentence(self):
+        controller = SpeechController()
+        controller._book = make_book()
+        controller._state = "playing"
+        controller._gen = 5
+        controller._sync_props = lambda: None
+
+        class TrackedDriver:
+            _dd_stream_events_installed = True
+
+        class StreamEngine:
+            def __init__(self):
+                self.proxy = type("Proxy", (), {"_driver": TrackedDriver()})()
+                self.callbacks = {}
+                self.number = 0
+                self.before_current_word = None
+
+            def connect(self, topic, callback):
+                self.callbacks[topic] = callback
+                return topic
+
+            def disconnect(self, token):
+                self.callbacks.pop(token, None)
+
+            def say(self, text, name=None):
+                self.number += 1
+                self.name = name
+                self.callbacks["sapi-stream-queued"](
+                    name=name, stream_number=self.number,
+                )
+
+            def iterate(self):
+                if self.number == 2:
+                    # pyttsx3's mutable proxy calls both callbacks with the
+                    # second name although SAPI still reports stream one.
+                    self.callbacks["sapi-stream-word"](
+                        name=self.name, stream_number=1, length=2,
+                    )
+                    self.callbacks["sapi-stream-end"](
+                        name=self.name, stream_number=1, completed=True,
+                    )
+                    self.before_current_word = controller.drain()
+                self.callbacks["sapi-stream-word"](
+                    name=self.name, stream_number=self.number, length=2,
+                )
+                self.callbacks["sapi-stream-end"](
+                    name=self.name, stream_number=self.number, completed=True,
+                )
+
+            def stop(self):
+                pass
+
+        engine = StreamEngine()
+        controller._engine = engine
+        for text in ("第一句。", "第二句。"):
+            self.assertTrue(controller._speak_sapi(
+                text, 5, {"type": "sentence_start", "text": text},
+            ))
+            self.assertEqual(
+                [event["text"] for event in controller.drain()], [text],
+            )
+        self.assertEqual(engine.before_current_word, [])
+
+    def test_sapi_incomplete_end_stream_replays_even_when_pause_is_not_polled(self):
+        for fast_resume in (False, True):
+            with self.subTest(fast_resume=fast_resume):
+                controller = SpeechController()
+                controller._book = make_book()
+                controller._state = "playing"
+                controller._gen = 5
+                controller._sync_props = lambda: None
+
+                class InterruptedEngine:
+                    def __init__(self):
+                        self.callbacks = {}
+                        self.name = None
+
+                    def connect(self, topic, callback):
+                        self.callbacks[topic] = callback
+                        return topic
+
+                    def disconnect(self, token):
+                        self.callbacks.pop(token, None)
+
+                    def say(self, text, name=None):
+                        self.name = name
+
+                    def iterate(self):
+                        self.callbacks["started-word"](name="第一", length=2)
+                        controller.pause()
+                        self.callbacks["finished-utterance"](
+                            name=self.name, completed=False
+                        )
+                        if fast_resume:
+                            controller.resume()
+
+                    def stop(self):
+                        pass
+
+                controller._engine = InterruptedEngine()
+                result = controller._speak_sapi(
+                    "第一句。", 5, {"type": "sentence_start", "text": "第一句。"}
+                )
+                self.assertIs(result, controller._SAPI_INTERRUPTED)
+                self.assertFalse(any(
+                    event["type"] == "error" for event in controller.drain()
+                ))
 
     def test_edge_then_incomplete_sapi_fallback_does_not_advance_text(self):
         controller = SpeechController()
@@ -1041,7 +1393,7 @@ class SpeechControllerContractTests(unittest.TestCase):
                 self.name = name
 
             def iterate(self):
-                self.callbacks["started-word"](name=self.name)
+                self.callbacks["started-word"](name="第二", location=0, length=2)
                 self.callbacks["finished-utterance"](
                     name=self.name, completed=False
                 )
@@ -1100,7 +1452,7 @@ class SpeechControllerContractTests(unittest.TestCase):
                 self.name = name
 
             def iterate(self):
-                self.callbacks["started-word"](name=self.name)
+                self.callbacks["started-word"](name="第一", location=0, length=2)
                 self.callbacks["finished-utterance"](
                     name=self.name, completed=True
                 )
@@ -1168,7 +1520,7 @@ class SpeechControllerContractTests(unittest.TestCase):
                 started = self.callbacks.pop("started-word", None)
                 if started:
                     calls.append(("startedCallback", threading.get_ident()))
-                    started(name=self.name)
+                    started(name="第一", location=0, length=2)
                 finished = self.callbacks.pop("finished-utterance", None)
                 if finished:
                     finished(name=self.name, completed=True)

@@ -62,6 +62,57 @@ _EDGE_RECOVERY_MAX_SECONDS = 300.0
 _EDGE_AUDIO_CACHE_ITEMS = 24
 _EDGE_AUDIO_CACHE_BYTES = 16 * 1024 * 1024
 
+
+def _install_sapi_stream_events():
+    """Keep SAPI's stream identity through pyttsx3's mutable utterance queue."""
+    from pyttsx3.drivers import sapi5
+
+    if getattr(sapi5.SAPI5Driver, "_dd_stream_events_installed", False):
+        return
+
+    def say_with_stream(self, text):
+        self._proxy.setBusy(True)
+        self._proxy.notify("started-utterance")
+        self._speaking = True
+        self._current_text = text
+        stream = int(self._tts.Speak(str(text).encode("utf-8").decode("utf-8"), 1))
+        self._dd_current_stream = stream
+        self._proxy.notify("sapi-stream-queued", stream_number=stream)
+
+    sink = sapi5.SAPI5DriverEventSink
+    original_start = sink._ISpeechVoiceEvents_StartStream
+    original_word = sink._ISpeechVoiceEvents_Word
+    original_end = sink._ISpeechVoiceEvents_EndStream
+
+    def is_current(event_sink, stream_number):
+        return int(stream_number) == getattr(event_sink._driver, "_dd_current_stream", None)
+
+    def start_for_current(self, stream_number, stream_position):
+        if is_current(self, stream_number):
+            return original_start(self, stream_number, stream_position)
+
+    def word_for_current(self, stream_number, stream_position, char, length):
+        if is_current(self, stream_number):
+            self._driver._proxy.notify(
+                "sapi-stream-word", stream_number=int(stream_number),
+                location=char, length=length,
+            )
+            return original_word(self, stream_number, stream_position, char, length)
+
+    def end_for_current(self, stream_number, stream_position):
+        if is_current(self, stream_number):
+            self._driver._proxy.notify(
+                "sapi-stream-end", stream_number=int(stream_number),
+                completed=not self._driver._stopping,
+            )
+            return original_end(self, stream_number, stream_position)
+
+    sapi5.SAPI5Driver.say = say_with_stream
+    sink._ISpeechVoiceEvents_StartStream = start_for_current
+    sink._ISpeechVoiceEvents_Word = word_for_current
+    sink._ISpeechVoiceEvents_EndStream = end_for_current
+    sapi5.SAPI5Driver._dd_stream_events_installed = True
+
 # 免费优质中文 Edge 语音（音色自然，接近豆包级）
 EDGE_VOICES = [
     ("zh-CN-XiaoxiaoNeural", "晓晓·女声·温柔"),
@@ -647,6 +698,7 @@ class SpeechController:
         self._cv = threading.Condition()
         self._state = "idle"  # idle / playing / paused
         self._engine = None
+        self._sapi_rebuild = False
         self._thread = None
         self._ready = None
         self._book = None
@@ -1581,9 +1633,38 @@ class SpeechController:
     def _ensure_engine(self):
         # 仅 SAPI 后端需要 pyttsx3 引擎；Edge 后端按需初始化 pygame
         if self._engine is None and pyttsx3 is not None:
-            engine = pyttsx3.init()
+            _install_sapi_stream_events()
+            # pyttsx3.init caches its engine. After a stopped sentence, create
+            # a new COM voice so late events from the old one cannot be replayed.
+            engine = (pyttsx3.engine.Engine("sapi5") if self._sapi_rebuild
+                      else pyttsx3.init())
             engine.startLoop(useDriverLoop=False)
             self._engine = engine
+            self._sapi_rebuild = False
+
+    def _discard_sapi_engine(self):
+        engine = self._engine
+        if engine is None:
+            return
+        self._engine = None
+        self._sapi_rebuild = True
+        self._applied_voice = None
+        self._applied_rate = None
+        try:
+            engine.stop()
+        except Exception:
+            pass
+        try:
+            engine.endLoop()
+        except Exception:
+            pass
+        driver = getattr(getattr(engine, "proxy", None), "_driver", None)
+        if driver is not None:
+            try:
+                driver._tts.EventInterests = 0
+                driver._advise.disconnect()
+            except Exception:
+                pass
 
     def _sync_props(self):
         with self._cv:
@@ -1780,11 +1861,37 @@ class SpeechController:
         done = threading.Event()
         started = threading.Event()
         interrupted_by_pause = False
+        with self._cv:
+            resume_counter_at_start = self._resume_counter
         result = {"completed": None, "error": None}
         utterance_name = f"sapi-{gen}-{id(done)}"
+        expected_stream = {"number": None}
+        stream_tracking = False
 
-        def _on_audio_started(name=None, **kw):
-            if name != utterance_name:
+        def _on_stream_queued(name=None, stream_number=None, **kw):
+            if name == utterance_name:
+                expected_stream["number"] = stream_number
+
+        def _on_stream_word(stream_number=None, length=None, **kw):
+            if stream_number != expected_stream["number"] or not length:
+                return
+            if not started.is_set():
+                started.set()
+                if start_event is not None:
+                    self._post(dict(start_event), gen)
+
+        def _on_stream_end(stream_number=None, completed=None, **kw):
+            if stream_number == expected_stream["number"]:
+                result["completed"] = completed
+                done.set()
+
+        def _on_audio_started(name=None, length=None, **kw):
+            if stream_tracking:
+                return
+            # pyttsx3 sends SAPI StartStream on the started-word topic with
+            # the utterance name before speech is audible. Its Word events
+            # carry the spoken word as name and a positive character length.
+            if name == utterance_name or not length:
                 return
             if started.is_set():
                 return
@@ -1793,6 +1900,8 @@ class SpeechController:
                 self._post(dict(start_event), gen)
 
         def _on_finished(name=None, completed=None, **kw):
+            if stream_tracking:
+                return
             if name != utterance_name:
                 return
             result["completed"] = completed
@@ -1807,14 +1916,26 @@ class SpeechController:
         started_token = None
         finished_token = None
         error_token = None
+        stream_tokens = []
         try:
             self._ensure_engine()
             if self._engine is None:
                 raise RuntimeError("系统语音不可用")
             self._sync_props()
-            # SAPI5 emits started-utterance before calling the asynchronous
-            # Speak API. Its first started-word comes from StartStream, when
-            # audio output has actually begun.
+            driver = getattr(getattr(self._engine, "proxy", None), "_driver", None)
+            stream_tracking = bool(
+                driver is not None
+                and getattr(type(driver), "_dd_stream_events_installed", False)
+            )
+            if stream_tracking:
+                stream_tokens = [
+                    self._engine.connect("sapi-stream-queued", _on_stream_queued),
+                    self._engine.connect("sapi-stream-word", _on_stream_word),
+                    self._engine.connect("sapi-stream-end", _on_stream_end),
+                ]
+            # SAPI5 emits started-utterance before asynchronous Speak and
+            # StartStream before the first word. Publish the sentence only
+            # from the first Word callback, closer to audible speech.
             started_token = self._engine.connect("started-word", _on_audio_started)
             finished_token = self._engine.connect("finished-utterance", _on_finished)
             error_token = self._engine.connect("error", _on_error)
@@ -1840,6 +1961,17 @@ class SpeechController:
                     raise RuntimeError("系统语音未确认完成")
             with self._cv:
                 paused = self._state == "paused"
+                resumed_since_start = self._resume_counter != resume_counter_at_start
+            if (
+                done.is_set() and result["completed"] is False
+                and result["error"] is None
+                and (paused or resumed_since_start or interrupted_by_pause)
+            ):
+                # EndStream can arrive after Pause's stop but before this
+                # worker observes the paused state. A fast Resume can even
+                # restore playing first. The driver's incomplete result is
+                # authoritative: replay this sentence instead of advancing.
+                interrupted_by_pause = True
             interrupted = self._should_stop(gen) or paused or interrupted_by_pause
             if result["error"] is not None and not interrupted:
                 raise RuntimeError("系统语音驱动出错") from result["error"]
@@ -1861,13 +1993,15 @@ class SpeechController:
             )
             return False
         finally:
-            for token in (started_token, finished_token, error_token):
+            for token in (started_token, finished_token, error_token, *stream_tokens):
                 if token is None:
                     continue
                 try:
                     self._engine.disconnect(token)
                 except Exception:
                     pass
+            if interrupted_by_pause and stream_tracking:
+                self._discard_sapi_engine()
         if interrupted_by_pause:
             return self._SAPI_INTERRUPTED
         return True

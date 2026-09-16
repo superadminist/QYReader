@@ -127,10 +127,10 @@ class PlaybackService:
             self._ensure_bound()
             if session_id is not None and str(session_id) != self._session_id:
                 raise RuntimeError("reader session is not bound")
-            # Preserve the real event order around a UI command.  Without this
-            # flush, a queued audio-start could be emitted after the later
-            # pause-state event and make the floating lyric jump on one click.
-            self._flush_speech_events()
+            # A sentence can start between the last Qt poll and this Pause
+            # click. Keep the last visible lyric while flushing that queued
+            # start; publish it only after audio is confirmed on Resume.
+            self._flush_speech_events(defer_sentence_start=command == "pause")
             self._command_id = command_id
             if command == "play":
                 accepted = self._play()
@@ -344,16 +344,16 @@ class PlaybackService:
         self._queue_event("state")
         return True
 
-    def _consume_raw_event(self, raw):
+    def _consume_raw_event(self, raw, defer_sentence_start=False):
         generation = raw.get("generation")
         if generation != self._generation:
             return None
         event_type = raw.get("type")
         if event_type == "sentence_start":
-            if self._status == "paused":
-                # A start event can race with the 25 ms Qt polling boundary.
-                # Freeze the visible lyric while paused and publish it only
-                # when playback resumes.
+            if self._status == "paused" or (defer_sentence_start and self._status == "playing"):
+                # A start event can race with the 25 ms Qt polling boundary
+                # or be queued just before Pause. Keep the last visible lyric
+                # until resumed audio confirms the next sentence.
                 self._deferred_sentence_start = dict(raw)
                 return None
             chapter_index = int(raw["chapter_idx"])
@@ -373,6 +373,8 @@ class PlaybackService:
                 self._active_backend = self._speech.backend()
             return self._event("sentenceStart")
         if event_type == "sentence_resume":
+            if defer_sentence_start:
+                return None
             deferred = self._deferred_sentence_start
             self._deferred_sentence_start = None
             if deferred is not None and self._status == "playing":
@@ -431,9 +433,9 @@ class PlaybackService:
             return self._event("state")
         return None
 
-    def _flush_speech_events(self):
+    def _flush_speech_events(self, defer_sentence_start=False):
         for raw in self._speech.drain():
-            event = self._consume_raw_event(raw)
+            event = self._consume_raw_event(raw, defer_sentence_start)
             if event is not None:
                 self._pending_events.append(event)
 
