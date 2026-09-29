@@ -12,6 +12,7 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 - The React UI in this directory is the production Qt WebEngine frontend as well as the browser prototype; contract changes must update both Qt and demo transports and rebuild `dist/client`.
 - Match the supplied `key-ui` screenshots as a macOS-style desktop reading experience.
+- Content-library cards use an app-styled Chinese context menu for management actions; never expose WebEngine's generic browser menu on a book card. Label removal by its exact effect and confirm it before changing the library.
 - Include the content library, reading view, chapter directory, import-text dialog, playback bar, and bilingual floating reader.
 - The floating reader must be movable and freely resizable from its lower-right corner.
 - Use an explicit visible lower-right resize handle with pointer-drag behavior; do not rely only on the browser's subtle native resize affordance.

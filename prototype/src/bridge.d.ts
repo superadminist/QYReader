@@ -4,6 +4,7 @@ export interface BridgeError {
   code: string;
   message: string;
   retryable: boolean;
+  details?: Record<string, unknown>;
 }
 
 export interface BridgeResponse<T> {
@@ -468,6 +469,10 @@ export interface ReaderControls {
   }): Promise<BridgeResponse<ReaderSettings>>;
 }
 
+export interface LibraryControls {
+  removeBook(bookId: string): Promise<BridgeResponse<{ bookId: string; removed: boolean }>>;
+}
+
 export interface FloatingReaderControls {
   getState(): Promise<BridgeResponse<FloatingReaderState>>;
   show(): Promise<BridgeResponse<FloatingReaderState>>;
@@ -520,6 +525,7 @@ export interface BridgeConnection {
   updates: SoftwareUpdateControls;
   speech: SpeechControls;
   imports: ImportControls;
+  library: LibraryControls;
   reader: ReaderControls;
   floating: FloatingReaderControls;
   onBridgeError(callback: (payload: string) => void): void;

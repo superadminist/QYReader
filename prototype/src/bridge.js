@@ -45,7 +45,7 @@ function demoReaderWindow(sessionId, bookId, anchorOffset = 0) {
 }
 
 const EMPTY_DATA = {
-  app: { version: "2.1.0" },
+  app: { version: "2.1.1" },
   library: { books: [], total: 0 },
   preferences: { theme: "护眼", colorScheme: "light", autoOpenLast: true, closeToTray: false, autoCheckUpdates: true, startupBookId: "" },
   window: { isMaximized: false, isFullScreen: false },
@@ -60,7 +60,7 @@ const EMPTY_DATA = {
   },
   softwareUpdate: {
     status: "idle",
-    currentVersion: "2.1.0",
+    currentVersion: "2.1.1",
     latestVersion: "",
     lastCheckedAt: "",
     message: "尚未检查更新。",
@@ -619,6 +619,10 @@ function validReaderBookmarkRemove(data) {
   return Boolean(data && typeof data.bookmarkId === "string" && typeof data.removed === "boolean");
 }
 
+function validLibraryRemove(data) {
+  return Boolean(data && typeof data.bookId === "string" && data.bookId && data.removed === true);
+}
+
 function validReaderPlaybackCommand(data) {
   return Boolean(data && typeof data.commandId === "string" && data.commandId && typeof data.accepted === "boolean");
 }
@@ -850,6 +854,15 @@ function nativeControls(nativeBridge) {
   };
 }
 
+function nativeLibrary(nativeBridge) {
+  return {
+    async removeBook(bookId) {
+      if (typeof bookId !== "string" || !bookId) throw new BridgeProtocolError("书籍编号无效。", "BRIDGE_INVALID_ARGUMENT");
+      return parseBridgeResponse(await invokeWithResult(nativeBridge, "removeLibraryBook", [bookId]), validLibraryRemove);
+    },
+  };
+}
+
 function nativeSpeech(nativeBridge) {
   return {
     async updatePreferences(input) {
@@ -952,6 +965,7 @@ function createNativeConnection(nativeBridge, initialState) {
     updates: nativeSoftwareUpdates(nativeBridge),
     speech: nativeSpeech(nativeBridge),
     imports: nativeImports(nativeBridge),
+    library: nativeLibrary(nativeBridge),
     reader: nativeReader(nativeBridge),
     floating: nativeFloating(nativeBridge),
     onBridgeError(callback) {
@@ -1266,6 +1280,15 @@ function createDemoConnection() {
         const job = jobs.get(jobId);
         if (job) job.cancelled = true;
         return response({ jobId, cancelRequested: Boolean(job) });
+      },
+    },
+    library: {
+      async removeBook(bookId) {
+        const index = initialState.data.library.books.findIndex((book) => book.id === bookId);
+        if (index < 0) throw new BridgeProtocolError("这项内容已不在内容库中。", "BOOK_NOT_FOUND");
+        initialState.data.library.books.splice(index, 1);
+        initialState.data.library.total = initialState.data.library.books.length;
+        return response({ bookId, removed: true });
       },
     },
     reader: {

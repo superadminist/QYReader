@@ -116,7 +116,7 @@ class DesktopBridgeTests(unittest.TestCase):
         self.assertEqual(payload["schemaVersion"], SCHEMA_VERSION)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["data"]["library"]["total"], 1)
-        self.assertEqual(payload["data"]["app"]["version"], "2.1.0")
+        self.assertEqual(payload["data"]["app"]["version"], "2.1.1")
         self.assertEqual(payload["data"]["preferences"]["theme"], "护眼")
         self.assertTrue(payload["data"]["preferences"]["autoOpenLast"])
         self.assertFalse(payload["data"]["preferences"]["closeToTray"])
@@ -137,6 +137,7 @@ class DesktopBridgeTests(unittest.TestCase):
         self.assertIn("selectImportFiles()", signatures)
         self.assertIn("startFileImport(QString)", signatures)
         self.assertIn("startPasteImport(QString)", signatures)
+        self.assertIn("removeLibraryBook(QString)", signatures)
         self.assertIn("cancelImport(QString)", signatures)
         self.assertIn("importProgress(QString)", signatures)
         self.assertIn("importFinished(QString)", signatures)
@@ -161,6 +162,22 @@ class DesktopBridgeTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"]["code"], "LIBRARY_INVALID")
         self.assertEqual(payload["data"]["library"], {"books": [], "total": 0})
+
+    def test_remove_library_book_keeps_original_file(self):
+        book_id = "remove-me"
+        library_path = self.data_dir / "library.json"
+        library_path.parent.mkdir(parents=True, exist_ok=True)
+        library_path.write_text(json.dumps({
+            "books": {book_id: {"id": book_id, "title": "待移除", "path": os.fspath(self.source)}},
+            "settings": {"last_book": book_id},
+        }), encoding="utf-8")
+        result = json.loads(self.bridge.removeLibraryBook(book_id))
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["data"]["removed"])
+        self.assertTrue(self.source.exists())
+        stored = json.loads(library_path.read_text(encoding="utf-8"))
+        self.assertEqual(stored["books"], {})
+        self.assertEqual(stored["settings"]["last_book"], "")
 
     def test_window_controls_delegate_to_the_host(self):
         state_spy = QSignalSpy(self.bridge.windowStateChanged)

@@ -8,6 +8,7 @@ import {
   CaretRight,
   CornersOut,
   Crosshair,
+  DotsThreeVertical,
   FileArrowUp,
   GearSix,
   Headphones,
@@ -24,6 +25,7 @@ import {
   SidebarSimple,
   SpeakerHigh,
   TextAa,
+  Trash,
   UploadSimple,
   WifiHigh,
   X,
@@ -61,7 +63,7 @@ const DEFAULT_APP_PREFERENCES = {
 
 const DEFAULT_SOFTWARE_UPDATE = {
   status: "idle",
-  currentVersion: "2.1.0",
+  currentVersion: "2.1.1",
   latestVersion: "",
   lastCheckedAt: "",
   message: "尚未检查更新。",
@@ -312,6 +314,7 @@ function Library({
   error,
   loading,
   openBook,
+  removeBook,
   openPaste,
   selectFiles,
   showUnavailable,
@@ -322,6 +325,35 @@ function Library({
   openAfterImportBookId,
 }) {
   const [query, setQuery] = useState("");
+  const [bookMenu, setBookMenu] = useState(null);
+  const [bookToRemove, setBookToRemove] = useState(null);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState("");
+  useEffect(() => {
+    if (!bookMenu) return undefined;
+    const closeMenu = () => setBookMenu(null);
+    const onKeyDown = (event) => { if (event.key === "Escape") closeMenu(); };
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [bookMenu]);
+  const showBookMenu = (event, book) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setBookMenu({ book, x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 76) });
+  };
+  const confirmRemove = async () => {
+    if (!bookToRemove || removing) return;
+    setRemoving(true);
+    setRemoveError("");
+    const error = await removeBook(bookToRemove);
+    setRemoving(false);
+    if (error) setRemoveError(error);
+    else setBookToRemove(null);
+  };
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visibleBooks = normalizedQuery
     ? books.filter((book) => book.title.toLocaleLowerCase().includes(normalizedQuery))
@@ -351,10 +383,13 @@ function Library({
       <div className="section-title"><div><h2>最近阅读</h2><span>{visibleBooks.length} 项内容</span></div><button className="quiet-button"><List /> 列表</button></div>
       <div className="book-grid">
         {visibleBooks.map((book) => (
-          <button key={book.id} className={`book-card ${book.id === openAfterImportBookId ? "just-imported" : ""}`} aria-disabled={!readerEnabled} onClick={() => openBook(book)}>
-            <div className="cover-wrap"><img src={book.coverUrl} alt="" /><span className="format-badge">{book.format || "TXT"}</span><span className="resume-pill"><Play weight="fill" /> 继续</span></div>
-            <strong>{book.title}</strong><small>{book.currentChapterTitle || book.author || "尚未开始阅读"}</small><div className="book-progress"><span style={{ width: `${book.progressPercent}%` }} /></div><em>{book.progressPercent}%</em>
-          </button>
+          <div key={book.id} className={`book-card ${book.id === openAfterImportBookId ? "just-imported" : ""}`} onContextMenu={(event) => showBookMenu(event, book)}>
+            <button className="book-open" aria-label={`阅读 ${book.title}`} aria-disabled={!readerEnabled} onClick={() => openBook(book)}>
+              <div className="cover-wrap"><img src={book.coverUrl} alt="" /><span className="format-badge">{book.format || "TXT"}</span><span className="resume-pill"><Play weight="fill" /> 继续</span></div>
+              <strong>{book.title}</strong><small>{book.currentChapterTitle || book.author || "尚未开始阅读"}</small><div className="book-progress"><span style={{ width: `${book.progressPercent}%` }} /></div><em>{book.progressPercent}%</em>
+            </button>
+            <button className="book-more" aria-label={`${book.title}的更多操作`} title="更多操作" onClick={(event) => showBookMenu(event, book)}><DotsThreeVertical weight="bold" /></button>
+          </div>
         ))}
         {loading ? <div className="library-loading">正在读取内容库…</div> : null}
         {!loading && visibleBooks.length === 0 ? (
@@ -365,6 +400,8 @@ function Library({
           </div>
         ) : null}
       </div>
+      {bookMenu ? <div className="book-context-menu" role="menu" style={{ left: Math.max(8, bookMenu.x), top: Math.max(8, bookMenu.y) }} onPointerDown={(event) => event.stopPropagation()}><button role="menuitem" onClick={() => { setBookToRemove(bookMenu.book); setRemoveError(""); setBookMenu(null); }}><Trash /> 从内容库移除</button></div> : null}
+      {bookToRemove ? <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !removing && setBookToRemove(null)}><div className="paste-modal remove-book-modal" role="alertdialog" aria-modal="true" aria-labelledby="remove-book-title" aria-describedby="remove-book-detail"><div className="modal-header"><div><span className="modal-icon remove"><Trash /></span><div><h2 id="remove-book-title">移出内容库？</h2><p id="remove-book-detail">“{bookToRemove.title}”将从内容库移除，阅读进度也会移除。原文件和应用缓存会保留。</p></div></div></div>{removeError ? <p className="modal-error" role="alert">{removeError}</p> : null}<div className="remove-book-actions"><button className="secondary-button" disabled={removing} onClick={() => setBookToRemove(null)}>取消</button><button className="remove-book-confirm" disabled={removing} onClick={confirmRemove}>{removing ? "正在移除…" : "确认移除"}</button></div></div></div> : null}
     </section>
   );
 }
@@ -1128,7 +1165,7 @@ function SettingsModal({ preferences, speech, floatingSettings, version, softwar
               </div>
               <p className="update-security-note">仅下载版本匹配的 Windows 安装包；SHA256 校验通过后才允许安装。</p>
             </section>
-            <section className="settings-section about-section"><h3>关于</h3><p>启远阅读（QYReader） {version || "2.1.0"} · Qt WebEngine 桌面版</p></section>
+            <section className="settings-section about-section"><h3>关于</h3><p>启远阅读（QYReader） {version || "2.1.1"} · Qt WebEngine 桌面版</p></section>
           </> : null}
         </div>
       </div>
@@ -1180,7 +1217,7 @@ function MainApplication() {
   const [nativeFloatingState, setNativeFloatingState] = useState(null);
   const [appPreferences, setAppPreferences] = useState(DEFAULT_APP_PREFERENCES);
   const [speechState, setSpeechState] = useState(DEFAULT_SPEECH_STATE);
-  const [appVersion, setAppVersion] = useState("2.1.0");
+  const [appVersion, setAppVersion] = useState("2.1.1");
   const [softwareUpdate, setSoftwareUpdate] = useState(DEFAULT_SOFTWARE_UPDATE);
   const [updatePromptVersion, setUpdatePromptVersion] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1233,9 +1270,9 @@ function MainApplication() {
         setSoftwareUpdate({
           ...connected.initialState.data.softwareUpdate,
           status: "available",
-          latestVersion: "2.1.0",
-          message: "发现新版本 QYReader 2.1.0，可以查看优化内容后决定是否更新。",
-          releaseUrl: "https://github.com/superadminist/QYReader/releases/tag/v2.1.0",
+          latestVersion: "2.1.2",
+          message: "发现新版本 QYReader 2.1.2，可以查看优化内容后决定是否更新。",
+          releaseUrl: "https://github.com/superadminist/QYReader/releases/tag/v2.1.2",
           publishedAt: "2026-09-15T08:00:00Z",
           releaseNotes: "## 本次优化\n\n- 修复悬浮窗暂停时文字跳到下一句\n- 朗读音色和语速切换立即生效\n- 设置中心改为紧凑分页并修复滚动闪烁",
           canDownload: true,
@@ -1410,7 +1447,7 @@ function MainApplication() {
       setBooks(error.initialData?.library?.books || []);
       setCapabilities(error.initialData?.capabilities || EMPTY_CAPABILITIES);
       setAppPreferences(error.initialData?.preferences || DEFAULT_APP_PREFERENCES);
-      setAppVersion(error.initialData?.app?.version || "2.1.0");
+      setAppVersion(error.initialData?.app?.version || "2.1.1");
       setSoftwareUpdate(error.initialData?.softwareUpdate || DEFAULT_SOFTWARE_UPDATE);
       setBridgeError(error.message || "无法连接桌面程序。");
       setLibraryLoading(false);
@@ -1522,6 +1559,18 @@ function MainApplication() {
     setOpenAfterImportBookId(book.id);
     setPasteOpen(false);
     beginReaderOpen(connection, book.id);
+  };
+  const removeBook = async (book) => {
+    const connection = connectionRef.current;
+    if (!connection) return "桌面通信尚未就绪。";
+    try {
+      await connection.library.removeBook(book.id);
+      setBooks((previous) => previous.filter((item) => item.id !== book.id));
+      setOpenAfterImportBookId((previous) => previous === book.id ? "" : previous);
+      return "";
+    } catch (error) {
+      return error.message || "移除内容失败，请稍后重试。";
+    }
   };
   const getReaderWindow = async (chapterIndex, anchorOffset) => {
     const connection = connectionRef.current;
@@ -1895,7 +1944,7 @@ function MainApplication() {
               ? <DemoReader setPage={setPage} fontSize={fontSize} setFontSize={setFontSize} playing={playing} setPlaying={setPlaying} floating={floating} setFloating={setFloating} networkNotice={networkNotice} />
               : page === "reader" && bridgeMode === "native"
                 ? <NativeReader state={readerState} networkNotice={networkNotice} selectedStart={selectedReaderStart} onChooseStart={chooseReaderStart} onBack={() => setPage("library")} onNavigate={navigateReader} onGetWindow={getReaderWindow} onUpdatePosition={updateReaderPosition} onSearch={searchReader} onLoadBookmarks={loadReaderBookmarks} onAddBookmark={addReaderBookmark} onRemoveBookmark={removeReaderBookmark} onCommand={controlReaderPlayback} onSettings={updateReaderSettings} floatingAvailable={capabilities.floatingReader} floatingVisible={Boolean(nativeFloatingState?.visible)} onFloatingToggle={switchToFloatingReader} onOpenSettings={() => setSettingsOpen(true)} />
-                : <Library books={books} error={bridgeError} loading={libraryLoading} openBook={openBook} openPaste={() => setPasteOpen(true)} selectFiles={selectFiles} showUnavailable={showUnavailable} capabilities={effectiveCapabilities} readerEnabled={readerEnabled} importState={importState} cancelImport={cancelImport} openAfterImportBookId={openAfterImportBookId} />}
+                : <Library books={books} error={bridgeError} loading={libraryLoading} openBook={openBook} removeBook={removeBook} openPaste={() => setPasteOpen(true)} selectFiles={selectFiles} showUnavailable={showUnavailable} capabilities={effectiveCapabilities} readerEnabled={readerEnabled} importState={importState} cancelImport={cancelImport} openAfterImportBookId={openAfterImportBookId} />}
           </main>
         </div>
       </div>

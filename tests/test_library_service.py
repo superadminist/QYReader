@@ -9,6 +9,8 @@ from unittest.mock import patch
 from novelreader.library_service import (
     DEFAULT_COVER_URLS,
     LibraryDataError,
+    LibraryEditService,
+    LibraryRemoveError,
     LibraryQueryService,
     default_library_path,
 )
@@ -114,6 +116,27 @@ class LibraryQueryServiceTests(unittest.TestCase):
                 resolved = default_library_path()
         self.assertEqual(resolved, appdata / "DDNovelReader" / "library.json")
         self.assertFalse(appdata.exists())
+
+    def test_remove_book_keeps_source_file_and_other_library_data(self):
+        source = Path(self.tempdir.name) / "user-book.txt"
+        source.write_text("原文件正文", encoding="utf-8")
+        self.write_library({
+            "books": {
+                "remove-me": {"title": "待移除", "path": os.fspath(source)},
+                "keep-me": {"title": "保留"},
+            },
+            "settings": {"last_book": "remove-me", "theme": "夜间"},
+            "other": {"kept": True},
+        })
+        result = LibraryEditService(self.path).remove_book("remove-me")
+        stored = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(result, {"bookId": "remove-me", "removed": True})
+        self.assertEqual(list(stored["books"]), ["keep-me"])
+        self.assertEqual(stored["settings"], {"last_book": "", "theme": "夜间"})
+        self.assertEqual(stored["other"], {"kept": True})
+        self.assertEqual(source.read_text(encoding="utf-8"), "原文件正文")
+        with self.assertRaises(LibraryRemoveError):
+            LibraryEditService(self.path).remove_book("remove-me")
 
 
 if __name__ == "__main__":

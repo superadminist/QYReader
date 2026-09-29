@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .library_lock import library_write_lock
 from .paths import default_data_dir
 
 
@@ -27,6 +28,14 @@ class LibraryDataError(Exception):
 
     code = "LIBRARY_INVALID"
     user_message = "书架数据读取失败，请检查 library.json 是否完整。"
+
+
+class LibraryRemoveError(Exception):
+    def __init__(self, code: str, message: str, retryable: bool = False):
+        super().__init__(message)
+        self.code = code
+        self.user_message = message
+        self.retryable = retryable
 
 
 def default_library_path() -> Path:
@@ -92,6 +101,7 @@ class LibraryQueryService:
         books.sort(key=lambda book: book["lastReadAt"] or 0, reverse=True)
         return {"books": books, "total": len(books)}
 
+
     @staticmethod
     def _book_summary(book_id: Any, metadata: dict[str, Any]) -> dict[str, Any]:
         resolved_book_id = _text(metadata.get("id") or book_id)
@@ -129,3 +139,40 @@ class LibraryQueryService:
             "totalChars": total_chars,
             "coverUrl": _default_cover_url(resolved_book_id),
         }
+
+
+class LibraryEditService:
+    """Remove a book from the library without touching source or cache files."""
+
+    def __init__(self, path: str | os.PathLike[str] | None = None):
+        self.path = Path(path) if path is not None else default_library_path()
+
+    def remove_book(self, book_id: str) -> dict[str, Any]:
+        if not isinstance(book_id, str) or not book_id:
+            raise LibraryRemoveError("INVALID_REQUEST", "书籍编号不能为空。")
+        with library_write_lock(self.path):
+            try:
+                with self.path.open("r", encoding="utf-8") as stream:
+                    payload = json.load(stream)
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise LibraryRemoveError("LIBRARY_INVALID", "内容库数据无法读取。") from exc
+            if not isinstance(payload, dict) or not isinstance(payload.get("books"), dict):
+                raise LibraryRemoveError("LIBRARY_INVALID", "内容库数据格式不正确。")
+            if book_id not in payload["books"]:
+                raise LibraryRemoveError("BOOK_NOT_FOUND", "这项内容已不在内容库中。")
+            payload["books"].pop(book_id)
+            settings = payload.get("settings")
+            if isinstance(settings, dict) and settings.get("last_book") == book_id:
+                settings["last_book"] = ""
+            temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+            try:
+                with temporary.open("w", encoding="utf-8") as stream:
+                    json.dump(payload, stream, ensure_ascii=False, indent=1)
+                os.replace(temporary, self.path)
+            except OSError as exc:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise LibraryRemoveError("LIBRARY_WRITE_FAILED", "移除失败，请检查数据目录是否可写。", True) from exc
+        return {"bookId": book_id, "removed": True}

@@ -21,6 +21,26 @@ import { windowControlPresentation } from "../src/windowControls.js";
 import { shouldApplyAudioWindow, windowContainsSentence } from "../src/readerWindowSync.js";
 import { readerPositionFromRange } from "../src/readerPosition.js";
 
+test("demo library removes only the selected book", async () => {
+  const connection = await connectBridge({ window: {}, document: null });
+  const before = connection.initialState.data.library.books.length;
+  const bookId = connection.initialState.data.library.books[0].id;
+  const result = await connection.library.removeBook(bookId);
+  assert.deepEqual(result.data, { bookId, removed: true });
+  assert.equal(connection.initialState.data.library.books.length, before - 1);
+  assert.equal(connection.initialState.data.library.books.some((book) => book.id === bookId), false);
+  connection.dispose();
+});
+
+test("native library remove calls the dedicated desktop slot", async () => {
+  const env = nativeEnvironment(createDemoInitialState());
+  const connection = await connectBridge({ window: env.browserWindow, document: null });
+  const result = await connection.library.removeBook("book-1");
+  assert.deepEqual(result.data, { bookId: "book-1", removed: true });
+  assert.deepEqual(env.calls, [["removeLibraryBook", "book-1"]]);
+  connection.dispose();
+});
+
 test("reader text range resolves an exact Unicode character offset", () => {
   const block = {
     nodeType: 1,
@@ -157,6 +177,7 @@ function nativeEnvironment(response) {
       calls.push(["cancelImport", jobId]);
       callback(ok({ jobId, cancelRequested: true }));
     },
+    removeLibraryBook(bookId, callback) { calls.push(["removeLibraryBook", bookId]); callback(ok({ bookId, removed: true })); },
     openReaderBook(bookId, callback) { calls.push(["openReaderBook", bookId]); callback(ok({ requestId: "reader-request", bookId, state: "loading" })); },
     getReaderWindow(input, callback) { calls.push(["getReaderWindow", input]); callback(ok(readerFixture().window)); },
     navigateReader(input, callback) { calls.push(["navigateReader", input]); const fixture = readerFixture(); callback(ok({ position: fixture.position, window: fixture.window, playback: fixture.playback })); },

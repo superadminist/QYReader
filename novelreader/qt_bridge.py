@@ -19,7 +19,7 @@ from . import __version__
 from .app_service import AppPreferencesError, AppPreferencesService
 from .floating_reader_service import FloatingReaderError, FloatingReaderService
 from .import_service import ImportCandidate, ImportServiceError, LibraryImportService
-from .library_service import LibraryDataError, LibraryQueryService
+from .library_service import LibraryDataError, LibraryEditService, LibraryQueryService, LibraryRemoveError
 from .playback_service import PlaybackService
 from .reader_service import ReaderService, ReaderServiceError
 from .software_update import (
@@ -121,6 +121,7 @@ class DesktopBridge(QObject):
         self._window = window
         self._library = library or LibraryQueryService()
         library_path = getattr(self._library, "path", None)
+        self._library_editor = LibraryEditService(library_path)
         self._importer = importer or LibraryImportService(library_path)
         self._reader = reader or ReaderService(library_path)
         self._playback = playback or PlaybackService(SpeechController())
@@ -343,6 +344,28 @@ class DesktopBridge(QObject):
         self._import_cancel.set()
         data["cancelRequested"] = True
         return self._ok_response(data)
+
+    @Slot(str, result=str)
+    def removeLibraryBook(self, book_id: str) -> str:
+        empty = {"bookId": str(book_id or ""), "removed": False}
+        if self._active_job_id or self._reader_open_request_id:
+            return self._error_response(empty, "LIBRARY_BUSY", "正在导入或打开内容，请稍后重试。", True)
+        try:
+            data = self._library_editor.remove_book(book_id)
+            identity = self._playback.session_identity()
+            if identity["bookId"] == book_id:
+                try:
+                    self._playback.control("stop", session_id=identity["sessionId"])
+                except Exception:
+                    LOGGER.exception("Could not stop removed library book")
+                finally:
+                    self._reader.close_session(identity["sessionId"])
+            return self._ok_response(data)
+        except LibraryRemoveError as exc:
+            return self._error_response(empty, exc.code, exc.user_message, exc.retryable)
+        except Exception:
+            LOGGER.exception("Unexpected error while removing library book")
+            return self._error_response(empty, "LIBRARY_REMOVE_FAILED", "移除内容失败，请稍后重试。", True)
 
     @Slot(str, result=str)
     def openReaderBook(self, book_id: str) -> str:
