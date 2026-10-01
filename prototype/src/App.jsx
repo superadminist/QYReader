@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
 import {
   ArrowLeft,
   Article,
@@ -10,10 +10,10 @@ import {
   Crosshair,
   DotsThreeVertical,
   FileArrowUp,
+  FolderOpen,
   GearSix,
   Headphones,
   LinkSimple,
-  List,
   MagnifyingGlass,
   Minus,
   Moon,
@@ -42,6 +42,7 @@ import {
 import { windowControlPresentation } from "./windowControls.js";
 import { shouldApplyAudioWindow, windowContainsSentence } from "./readerWindowSync.js";
 import { readerPositionFromPointer } from "./readerPosition.js";
+import { libraryDropTarget, moveLibraryBook } from "./libraryOrder.js";
 
 const EMPTY_CONTROLS = {
   minimizeWindow() {},
@@ -311,6 +312,10 @@ function WindowTitlebar({ controls, desktopMode, windowState }) {
 
 function Library({
   books,
+  sortMode,
+  setSortMode,
+  moveBook,
+  revealSource,
   error,
   loading,
   openBook,
@@ -329,6 +334,137 @@ function Library({
   const [bookToRemove, setBookToRemove] = useState(null);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState("");
+  const [draftBooks, setDraftBooks] = useState(null);
+  const [draggedId, setDraggedId] = useState("");
+  const [dragPreview, setDragPreview] = useState(null);
+  const dragPreviewRef = useRef(null);
+  const [sortPending, setSortPending] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const pageRef = useRef(null);
+  const gridRef = useRef(null);
+  const gestureRef = useRef(null);
+  const suppressOpenRef = useRef(false);
+  const previousRectsRef = useRef(new Map());
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const orderedBooks = draftBooks || books;
+  const visibleBooks = normalizedQuery
+    ? orderedBooks.filter((book) => book.title.toLocaleLowerCase().includes(normalizedQuery))
+    : orderedBooks;
+  const canDrag = sortMode === "manual" && !normalizedQuery && !loading && !sortPending;
+  useLayoutEffect(() => {
+    const nextRects = new Map();
+    for (const card of gridRef.current?.querySelectorAll("[data-book-id]") || []) {
+      const rect = card.getBoundingClientRect();
+      const previous = previousRectsRef.current.get(card.dataset.bookId);
+      nextRects.set(card.dataset.bookId, rect);
+      if (previous && card.dataset.bookId !== draggedId && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        const dx = previous.left - rect.left;
+        const dy = previous.top - rect.top;
+        if (dx || dy) card.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "translate(0, 0)" }], { duration: 180, easing: "cubic-bezier(.2,.75,.2,1)" });
+      }
+    }
+    previousRectsRef.current = nextRects;
+  }, [visibleBooks, draggedId]);
+  const cancelDrag = useCallback(() => {
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+    cancelAnimationFrame(gesture.frame);
+    gestureRef.current = null;
+    if (gesture.element.hasPointerCapture(gesture.pointerId)) gesture.element.releasePointerCapture(gesture.pointerId);
+    setTimeout(() => { suppressOpenRef.current = false; }, 0);
+    setDraggedId("");
+    setDragPreview(null);
+    setDraftBooks(null);
+  }, []);
+  useEffect(() => {
+    // Import/deletion/refresh while dragging invalidates the snapshot; cancel rather than lose content.
+    cancelDrag();
+    setDraftBooks(null);
+  }, [books, normalizedQuery, sortMode, cancelDrag]);
+  useEffect(() => {
+    const cancel = (event) => { if (event.type === "blur" || event.key === "Escape") cancelDrag(); };
+    const release = (event) => { if (gestureRef.current?.pointerId === event.pointerId) cancelDrag(); };
+    window.addEventListener("blur", cancel);
+    window.addEventListener("keydown", cancel);
+    window.addEventListener("pointerup", release);
+    window.addEventListener("pointercancel", release);
+    return () => { window.removeEventListener("blur", cancel); window.removeEventListener("keydown", cancel); window.removeEventListener("pointerup", release); window.removeEventListener("pointercancel", release); cancelAnimationFrame(gestureRef.current?.frame); };
+  }, [cancelDrag]);
+  const startDrag = (event, book) => {
+    if (!canDrag || event.button !== 0 || event.target.closest(".book-more")) return;
+    suppressOpenRef.current = false;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const gesture = { id: book.id, book, element: event.currentTarget, bounds, offsetX: event.clientX - bounds.left, offsetY: event.clientY - bounds.top, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY, active: false, books, frame: 0 };
+    gestureRef.current = gesture;
+    const tick = () => {
+      if (gestureRef.current !== gesture) return;
+      if (gesture.active) {
+        if (dragPreviewRef.current) dragPreviewRef.current.style.transform = `translate(${gesture.x - gesture.offsetX}px, ${gesture.y - gesture.offsetY}px) scale(1.035)`;
+        const page = pageRef.current;
+        const rect = page.getBoundingClientRect();
+        const edge = 56;
+        const velocity = gesture.y < rect.top + edge ? -Math.min(14, (rect.top + edge - gesture.y) / 4) : gesture.y > rect.bottom - edge ? Math.min(14, (gesture.y - rect.bottom + edge) / 4) : 0;
+        if (velocity) page.scrollTop += velocity;
+        const target = document.elementFromPoint(gesture.x, gesture.y)?.closest("[data-book-id]");
+        if (target && target.dataset.bookId !== gesture.id) {
+          const bounds = target.getBoundingClientRect();
+          const beforeId = libraryDropTarget(gesture.books, gesture.id, target.dataset.bookId, gesture.x > bounds.left + bounds.width / 2);
+          const next = moveLibraryBook(gesture.books, gesture.id, beforeId);
+          if (next.map((item) => item.id).join() !== gesture.books.map((item) => item.id).join()) {
+            gesture.books = next;
+            setDraftBooks(next);
+          }
+        }
+      }
+      gesture.frame = requestAnimationFrame(tick);
+    };
+    gesture.frame = requestAnimationFrame(tick);
+  };
+  const moveDrag = (event) => {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    gesture.x = event.clientX;
+    gesture.y = event.clientY;
+    if (!gesture.active && Math.hypot(gesture.x - gesture.startX, gesture.y - gesture.startY) >= 7) {
+      gesture.active = true;
+      gesture.element.setPointerCapture(event.pointerId);
+      suppressOpenRef.current = true;
+      setBookMenu(null);
+      setDraggedId(gesture.id);
+      setDragPreview({ book: gesture.book, width: gesture.bounds.width, x: gesture.startX - gesture.offsetX, y: gesture.startY - gesture.offsetY });
+      setDraftBooks(gesture.books);
+    }
+    if (gesture.active) event.preventDefault();
+  };
+  const finishDrag = async (event) => {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    cancelAnimationFrame(gesture.frame);
+    gestureRef.current = null;
+    setDraggedId("");
+    setDragPreview(null);
+    if (!gesture.active) return;
+    // The browser's synthetic click follows pointerup in this task.
+    setTimeout(() => { suppressOpenRef.current = false; }, 0);
+    const index = gesture.books.findIndex((book) => book.id === gesture.id);
+    const beforeBookId = gesture.books[index + 1]?.id ?? null;
+    const originalNext = books[books.findIndex((book) => book.id === gesture.id) + 1]?.id ?? null;
+    if (beforeBookId !== originalNext) {
+      setSortPending(true);
+      setActionError("");
+      try { await moveBook({ bookId: gesture.id, beforeBookId }); }
+      catch (error) { setActionError(error.message || "排序保存失败，已恢复原顺序。"); }
+      finally { setSortPending(false); }
+    }
+    setDraftBooks(null);
+  };
+  const changeSortMode = async (mode) => {
+    if (sortPending || mode === sortMode) return;
+    setSortPending(true);
+    setActionError("");
+    try { await setSortMode(mode); } catch (error) { setActionError(error.message || "无法切换排序方式。"); }
+    finally { setSortPending(false); }
+  };
   useEffect(() => {
     if (!bookMenu) return undefined;
     const closeMenu = () => setBookMenu(null);
@@ -343,7 +479,7 @@ function Library({
   const showBookMenu = (event, book) => {
     event.preventDefault();
     event.stopPropagation();
-    setBookMenu({ book, x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 76) });
+    setBookMenu({ book, x: Math.min(event.clientX, window.innerWidth - 230), y: Math.min(event.clientY, window.innerHeight - 122) });
   };
   const confirmRemove = async () => {
     if (!bookToRemove || removing) return;
@@ -354,13 +490,9 @@ function Library({
     if (error) setRemoveError(error);
     else setBookToRemove(null);
   };
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  const visibleBooks = normalizedQuery
-    ? books.filter((book) => book.title.toLocaleLowerCase().includes(normalizedQuery))
-    : books;
   const importing = ["selecting", "confirming", "processing", "cancelling"].includes(importState.status);
   return (
-    <section className="library-page">
+    <section ref={pageRef} className={`library-page ${draggedId ? "is-sorting" : ""}`}>
       <div className="library-heading">
         <div><p className="eyebrow">我的内容</p><h1>内容库</h1><p className="subtle">让文字成为可以随时聆听的陪伴。</p></div>
         <label className="search-field"><MagnifyingGlass /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索书籍或文章" /></label>
@@ -372,6 +504,7 @@ function Library({
         <button className="import-card" aria-disabled={!capabilities.fileImport || importing} onClick={capabilities.fileImport && !importing ? selectFiles : undefined}><span className="import-icon mint"><FileArrowUp weight="fill" /></span><span><strong>导入文件</strong><small>TXT、EPUB、DOCX、PDF</small></span><CaretRight /></button>
       </div>
       {error ? <div className="library-error" role="alert">{error}</div> : null}
+      {actionError ? <div className="library-error" role="alert">{actionError}</div> : null}
       {importState.message ? <div className={`import-notice ${importState.tone || "info"}`} role="status">{importState.message}</div> : null}
       {["processing", "cancelling"].includes(importState.status) ? (
         <div className="import-progress" aria-label="导入进度">
@@ -380,12 +513,13 @@ function Library({
           <button className="secondary-button" onClick={cancelImport} disabled={importState.status === "cancelling"}>取消导入</button>
         </div>
       ) : null}
-      <div className="section-title"><div><h2>最近阅读</h2><span>{visibleBooks.length} 项内容</span></div><button className="quiet-button"><List /> 列表</button></div>
-      <div className="book-grid">
+      <div className="section-title"><div><h2>{sortMode === "manual" ? "自定义排序" : "最近阅读"}</h2><span>{visibleBooks.length} 项内容</span></div><div className="library-sort-control" role="group" aria-label="内容库排序方式"><button className={sortMode !== "manual" ? "selected" : ""} disabled={sortPending} onClick={() => changeSortMode("recent")}>最近阅读</button><button className={sortMode === "manual" ? "selected" : ""} disabled={sortPending} onClick={() => changeSortMode("manual")}>自定义排序</button></div></div>
+      {sortMode === "manual" ? <p className="library-sort-hint" role="status">{normalizedQuery ? "搜索期间暂停拖动，清空搜索即可调整顺序。" : sortPending ? "正在保存排序…" : "拖动卡片调整顺序，阅读不会改变排列。"}</p> : null}
+      <div ref={gridRef} className={`book-grid ${canDrag ? "sortable" : ""}`}>
         {visibleBooks.map((book) => (
-          <div key={book.id} className={`book-card ${book.id === openAfterImportBookId ? "just-imported" : ""}`} onContextMenu={(event) => showBookMenu(event, book)}>
-            <button className="book-open" aria-label={`阅读 ${book.title}`} aria-disabled={!readerEnabled} onClick={() => openBook(book)}>
-              <div className="cover-wrap"><img src={book.coverUrl} alt="" /><span className="format-badge">{book.format || "TXT"}</span><span className="resume-pill"><Play weight="fill" /> 继续</span></div>
+          <div key={book.id} data-book-id={book.id} className={`book-card ${book.id === draggedId ? "dragging" : ""} ${book.id === openAfterImportBookId ? "just-imported" : ""}`} onContextMenu={(event) => showBookMenu(event, book)} onPointerDown={(event) => startDrag(event, book)} onPointerMove={moveDrag} onPointerUp={finishDrag} onPointerCancel={cancelDrag}>
+            <button className="book-open" aria-label={`阅读 ${book.title}`} aria-disabled={!readerEnabled} onClick={() => { if (!suppressOpenRef.current) openBook(book); }}>
+              <div className="cover-wrap"><img src={book.coverUrl} alt="" draggable={false} /><span className="format-badge">{book.format || "TXT"}</span><span className="resume-pill"><Play weight="fill" /> 继续</span></div>
               <strong>{book.title}</strong><small>{book.currentChapterTitle || book.author || "尚未开始阅读"}</small><div className="book-progress"><span style={{ width: `${book.progressPercent}%` }} /></div><em>{book.progressPercent}%</em>
             </button>
             <button className="book-more" aria-label={`${book.title}的更多操作`} title="更多操作" onClick={(event) => showBookMenu(event, book)}><DotsThreeVertical weight="bold" /></button>
@@ -400,7 +534,8 @@ function Library({
           </div>
         ) : null}
       </div>
-      {bookMenu ? <div className="book-context-menu" role="menu" style={{ left: Math.max(8, bookMenu.x), top: Math.max(8, bookMenu.y) }} onPointerDown={(event) => event.stopPropagation()}><button role="menuitem" onClick={() => { setBookToRemove(bookMenu.book); setRemoveError(""); setBookMenu(null); }}><Trash /> 从内容库移除</button></div> : null}
+      {dragPreview ? <div ref={dragPreviewRef} className="book-drag-preview" aria-hidden="true" style={{ width: dragPreview.width, transform: `translate(${dragPreview.x}px, ${dragPreview.y}px) scale(1.035)` }}><div className="cover-wrap"><img src={dragPreview.book.coverUrl} alt="" draggable={false} /></div><strong>{dragPreview.book.title}</strong></div> : null}
+      {bookMenu ? <div className="book-context-menu" role="menu" style={{ left: Math.max(8, bookMenu.x), top: Math.max(8, bookMenu.y) }} onPointerDown={(event) => event.stopPropagation()}><button role="menuitem" disabled={!bookMenu.book.canRevealSource} title={bookMenu.book.canRevealSource ? "在文件资源管理器中选中原文件" : "此内容没有可定位的源文件"} onClick={async () => { const book = bookMenu.book; setBookMenu(null); setActionError(""); try { await revealSource(book.id); } catch (error) { setActionError(error.message || "无法打开源文件位置。"); } }}><FolderOpen /> 打开源文件位置</button><div className="menu-separator" role="separator" /><button className="destructive" role="menuitem" onClick={() => { setBookToRemove(bookMenu.book); setRemoveError(""); setBookMenu(null); }}><Trash /> 从内容库移除</button></div> : null}
       {bookToRemove ? <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !removing && setBookToRemove(null)}><div className="paste-modal remove-book-modal" role="alertdialog" aria-modal="true" aria-labelledby="remove-book-title" aria-describedby="remove-book-detail"><div className="modal-header"><div><span className="modal-icon remove"><Trash /></span><div><h2 id="remove-book-title">移出内容库？</h2><p id="remove-book-detail">“{bookToRemove.title}”将从内容库移除，阅读进度也会移除。原文件和应用缓存会保留。</p></div></div></div>{removeError ? <p className="modal-error" role="alert">{removeError}</p> : null}<div className="remove-book-actions"><button className="secondary-button" disabled={removing} onClick={() => setBookToRemove(null)}>取消</button><button className="remove-book-confirm" disabled={removing} onClick={confirmRemove}>{removing ? "正在移除…" : "确认移除"}</button></div></div></div> : null}
     </section>
   );
@@ -520,7 +655,7 @@ function FloatingLyricLayer({ context, className = "", hidden = false }) {
   );
 }
 
-function NativeFloatingReader({ state, loading, error, networkNotice, pointerInside, onPointerInsideChange, pendingCommand, pendingSetting, onCommand, onSettings, onClose, onReturnToMain, onMove, onResize }) {
+function NativeFloatingReader({ state, loading, error, networkNotice, pointerInside, resizing, onPointerInsideChange, pendingCommand, pendingSetting, onCommand, onSettings, onClose, onReturnToMain, onMove, onResize }) {
   const { settings, playback, context } = state;
   const playing = playback.status === "playing";
   const canControlPlayback = Boolean(state.sessionId) && !pendingCommand;
@@ -540,7 +675,9 @@ function NativeFloatingReader({ state, loading, error, networkNotice, pointerIns
   const [departingLyric, setDepartingLyric] = useState(null);
   const [lyricDirection, setLyricDirection] = useState("");
   const hoverDisplayEnabled = settings.hoverDisplayEnabled !== false;
-  const interactionVisible = pointerInside;
+  const pointerBeforeResizeRef = useRef(pointerInside);
+  useEffect(() => { if (!resizing) pointerBeforeResizeRef.current = pointerInside; }, [resizing, pointerInside]);
+  const interactionVisible = resizing ? pointerBeforeResizeRef.current : pointerInside;
   const effectiveNetworkNotice = networkNotice || (playback.fallbackActive ? NETWORK_FALLBACK_NOTICE : null);
 
   useEffect(() => {
@@ -579,10 +716,11 @@ function NativeFloatingReader({ state, loading, error, networkNotice, pointerIns
     if (!root || !content) return undefined;
     let frame = 0;
     const fit = () => {
-      cancelAnimationFrame(frame);
+      if (frame) return;
       frame = requestAnimationFrame(() => {
+        frame = 0;
         root.dataset.contextMode = "all";
-        if (hoverDisplayEnabled && !pointerInside) {
+        if (hoverDisplayEnabled && !interactionVisible) {
           const current = content.querySelector('[data-sentence-role="current"]');
           content.scrollTop = content.scrollHeight > content.clientHeight + 1 && current
             ? Math.max(0, current.offsetTop - (content.clientHeight - current.offsetHeight) / 2)
@@ -602,7 +740,7 @@ function NativeFloatingReader({ state, loading, error, networkNotice, pointerIns
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [renderedContext.previous?.text, renderedContext.current?.text, renderedContext.next?.text, visibleFontSize, error, hoverDisplayEnabled, pointerInside]);
+  }, [renderedContext.previous?.text, renderedContext.current?.text, renderedContext.next?.text, visibleFontSize, error, hoverDisplayEnabled, interactionVisible]);
   const changeFontByWheel = (event) => {
     event.preventDefault();
     const change = floatingFontWheelChange(
@@ -649,6 +787,7 @@ function NativeFloatingReader({ state, loading, error, networkNotice, pointerIns
       data-pointer-inside={pointerInside ? "true" : "false"}
       data-hover-display-enabled={hoverDisplayEnabled ? "true" : "false"}
       data-interaction-visible={interactionVisible ? "true" : "false"}
+      data-resizing={resizing ? "true" : "false"}
       data-context-mode="all"
       onPointerEnter={() => onPointerInsideChange(true)}
       onPointerLeave={() => onPointerInsideChange(false)}
@@ -707,6 +846,7 @@ function FloatingApplication() {
   const [pendingCommand, setPendingCommand] = useState("");
   const [pendingSettings, setPendingSettings] = useState([]);
   const [pointerInside, setPointerInside] = useState(false);
+  const [resizing, setResizing] = useState(false);
   const connectionRef = useRef(null);
 
   useEffect(() => {
@@ -737,6 +877,9 @@ function FloatingApplication() {
       });
       connection.onFloatingPointerChanged((inside) => {
         if (active) setPointerInside(inside);
+      });
+      connection.onWindowInteractionChanged?.((event) => {
+        if (active && event.surface === "floating") setResizing(event.active);
       });
       try {
         const response = connection.mode === "demo" ? await connection.floating.show() : await connection.floating.getState();
@@ -824,6 +967,7 @@ function FloatingApplication() {
       <NativeFloatingReader
         state={state}
         pointerInside={pointerInside}
+        resizing={resizing}
         onPointerInsideChange={setPointerInside}
         loading={!floatingState}
         error={error}
@@ -1201,6 +1345,9 @@ function MainApplication() {
   const connectionRef = useRef(null);
   const [page, setPage] = useState(demoQaFloating || qaNetwork ? "reader" : "library");
   const [books, setBooks] = useState([]);
+  const [librarySortMode, setLibrarySortMode] = useState("recent");
+  const libraryRequestRef = useRef(0);
+  const [windowInteractionActive, setWindowInteractionActive] = useState(false);
   const [libraryLoading, setLibraryLoading] = useState(true);
   const [bridgeError, setBridgeError] = useState("");
   const [bridgeMode, setBridgeMode] = useState(nativeTransportAvailable ? "native" : "demo");
@@ -1256,8 +1403,10 @@ function MainApplication() {
       }
       connectionRef.current?.dispose();
       connectionRef.current = connected;
+      libraryRequestRef.current += 1;
       setBridgeMode(connected.mode);
       setBooks(connected.mode === "demo" && qaEmptyLibrary ? [] : connected.initialState.data.library.books);
+      setLibrarySortMode(connected.initialState.data.library.sortMode || "recent");
       setCapabilities(connected.initialState.data.capabilities);
       setAppPreferences(connected.initialState.data.preferences);
       setSpeechState(connected.initialState.data.speech);
@@ -1292,6 +1441,9 @@ function MainApplication() {
       });
       connected.onWindowStateChanged((nextWindowState) => {
         if (active) setWindowState(nextWindowState);
+      });
+      connected.onWindowInteractionChanged?.((event) => {
+        if (active && event.surface === "main") setWindowInteractionActive(event.active);
       });
       connected.onImportProgress((event) => {
         if (!active) return;
@@ -1336,6 +1488,7 @@ function MainApplication() {
         setPage("library");
         if (connected.mode === "demo") {
           setBooks([...connected.initialState.data.library.books]);
+          setLibrarySortMode(connected.initialState.data.library.sortMode || "recent");
           return;
         }
         try {
@@ -1445,6 +1598,7 @@ function MainApplication() {
       const failedConnection = error.connection;
       if (failedConnection) attachConnection(failedConnection);
       setBooks(error.initialData?.library?.books || []);
+      setLibrarySortMode(error.initialData?.library?.sortMode || "recent");
       setCapabilities(error.initialData?.capabilities || EMPTY_CAPABILITIES);
       setAppPreferences(error.initialData?.preferences || DEFAULT_APP_PREFERENCES);
       setAppVersion(error.initialData?.app?.version || "2.1.1");
@@ -1458,6 +1612,24 @@ function MainApplication() {
       connectionRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (page !== "library") return undefined;
+    const connection = connectionRef.current;
+    if (!connection || (connection.mode === "demo" && qaEmptyLibrary)) return undefined;
+    let active = true;
+    const requestId = ++libraryRequestRef.current;
+    connection.library.getState().then((response) => {
+      if (!active || connectionRef.current !== connection || requestId !== libraryRequestRef.current) return;
+      setBooks(response.data.books);
+      setLibrarySortMode(response.data.sortMode || "recent");
+    }).catch((error) => {
+      if (active && connectionRef.current === connection && requestId === libraryRequestRef.current) {
+        setBridgeError(error.message || "无法刷新内容库。");
+      }
+    });
+    return () => { active = false; };
+  }, [page, qaEmptyLibrary]);
 
   useEffect(() => {
     const version = softwareUpdate.latestVersion;
@@ -1563,6 +1735,7 @@ function MainApplication() {
   const removeBook = async (book) => {
     const connection = connectionRef.current;
     if (!connection) return "桌面通信尚未就绪。";
+    libraryRequestRef.current += 1;
     try {
       await connection.library.removeBook(book.id);
       setBooks((previous) => previous.filter((item) => item.id !== book.id));
@@ -1571,6 +1744,32 @@ function MainApplication() {
     } catch (error) {
       return error.message || "移除内容失败，请稍后重试。";
     }
+  };
+  const applyLibraryState = (data) => {
+    setBooks(data.books);
+    setLibrarySortMode(data.sortMode || "recent");
+  };
+  const updateLibraryOrder = async (operation) => {
+    const connection = connectionRef.current;
+    if (!connection) throw new Error("桌面通信尚未就绪。");
+    const requestId = ++libraryRequestRef.current;
+    try {
+      const response = await operation(connection.library);
+      if (connectionRef.current === connection && requestId === libraryRequestRef.current) applyLibraryState(response.data);
+    } catch (error) {
+      try {
+        const response = await connection.library.getState();
+        if (connectionRef.current === connection && requestId === libraryRequestRef.current) applyLibraryState(response.data);
+      } catch { /* The last confirmed state remains visible if refresh also fails. */ }
+      throw error;
+    }
+  };
+  const setLibrarySort = (mode) => updateLibraryOrder((library) => library.setSortMode(mode));
+  const moveLibraryItem = (input) => updateLibraryOrder((library) => library.moveBook(input));
+  const revealSource = async (bookId) => {
+    const connection = connectionRef.current;
+    if (!connection) throw new Error("桌面通信尚未就绪。");
+    await connection.library.revealSource(bookId);
   };
   const getReaderWindow = async (chapterIndex, anchorOffset) => {
     const connection = connectionRef.current;
@@ -1933,7 +2132,7 @@ function MainApplication() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [readerState, windowControls, nativeFloatingState]);
   return (
-    <div className={`prototype-stage ${desktopMode ? "desktop-host" : ""} ${floating && bridgeMode === "demo" ? "demo-floating-active" : ""} theme-${appPreferences.colorScheme}`} data-theme={appPreferences.theme} data-window-mode={windowState.isFullScreen ? "fullscreen" : windowState.isMaximized ? "maximized" : "normal"}>
+    <div className={`prototype-stage ${desktopMode ? "desktop-host" : ""} ${floating && bridgeMode === "demo" ? "demo-floating-active" : ""} theme-${appPreferences.colorScheme}`} data-theme={appPreferences.theme} data-resizing={windowInteractionActive ? "true" : "false"} data-window-mode={windowState.isFullScreen ? "fullscreen" : windowState.isMaximized ? "maximized" : "normal"}>
       {desktopMode ? <WindowResizeHandles controls={windowControls} /> : null}
       <div className="mac-window">
         <WindowTitlebar controls={windowControls} desktopMode={desktopMode} windowState={windowState} />
@@ -1944,7 +2143,7 @@ function MainApplication() {
               ? <DemoReader setPage={setPage} fontSize={fontSize} setFontSize={setFontSize} playing={playing} setPlaying={setPlaying} floating={floating} setFloating={setFloating} networkNotice={networkNotice} />
               : page === "reader" && bridgeMode === "native"
                 ? <NativeReader state={readerState} networkNotice={networkNotice} selectedStart={selectedReaderStart} onChooseStart={chooseReaderStart} onBack={() => setPage("library")} onNavigate={navigateReader} onGetWindow={getReaderWindow} onUpdatePosition={updateReaderPosition} onSearch={searchReader} onLoadBookmarks={loadReaderBookmarks} onAddBookmark={addReaderBookmark} onRemoveBookmark={removeReaderBookmark} onCommand={controlReaderPlayback} onSettings={updateReaderSettings} floatingAvailable={capabilities.floatingReader} floatingVisible={Boolean(nativeFloatingState?.visible)} onFloatingToggle={switchToFloatingReader} onOpenSettings={() => setSettingsOpen(true)} />
-                : <Library books={books} error={bridgeError} loading={libraryLoading} openBook={openBook} removeBook={removeBook} openPaste={() => setPasteOpen(true)} selectFiles={selectFiles} showUnavailable={showUnavailable} capabilities={effectiveCapabilities} readerEnabled={readerEnabled} importState={importState} cancelImport={cancelImport} openAfterImportBookId={openAfterImportBookId} />}
+                : <Library books={books} sortMode={librarySortMode} setSortMode={setLibrarySort} moveBook={moveLibraryItem} revealSource={revealSource} error={bridgeError} loading={libraryLoading} openBook={openBook} removeBook={removeBook} openPaste={() => setPasteOpen(true)} selectFiles={selectFiles} showUnavailable={showUnavailable} capabilities={effectiveCapabilities} readerEnabled={readerEnabled} importState={importState} cancelImport={cancelImport} openAfterImportBookId={openAfterImportBookId} />}
           </main>
         </div>
       </div>

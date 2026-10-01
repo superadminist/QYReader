@@ -27,7 +27,7 @@ class LibraryQueryServiceTests(unittest.TestCase):
 
     def test_missing_library_is_an_empty_read_only_result(self):
         service = LibraryQueryService(self.path)
-        self.assertEqual(service.load_library(), {"books": [], "total": 0})
+        self.assertEqual(service.load_library(), {"books": [], "total": 0, "sortMode": "recent"})
         self.assertFalse(self.path.exists())
 
     def test_reads_legacy_book_map_without_exposing_paths_or_writing(self):

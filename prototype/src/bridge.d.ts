@@ -26,6 +26,13 @@ export interface BookSummary {
   lastReadAt: number | null;
   totalChars: number;
   coverUrl: string;
+  canRevealSource: boolean;
+}
+
+export interface LibraryState {
+  books: BookSummary[];
+  total: number;
+  sortMode: "recent" | "manual";
 }
 
 export type AppTheme = "白天" | "护眼" | "夜间" | "米黄";
@@ -88,7 +95,7 @@ export interface SpeechState {
 
 export interface InitialStateData {
   app: { version: string };
-  library: { books: BookSummary[]; total: number };
+  library: LibraryState;
   preferences: AppPreferences;
   window: { isMaximized: boolean; isFullScreen: boolean };
   speech: SpeechState;
@@ -470,6 +477,10 @@ export interface ReaderControls {
 }
 
 export interface LibraryControls {
+  getState(): Promise<BridgeResponse<LibraryState>>;
+  setSortMode(mode: "recent" | "manual"): Promise<BridgeResponse<LibraryState>>;
+  moveBook(input: { bookId: string; beforeBookId: string | null }): Promise<BridgeResponse<LibraryState>>;
+  revealSource(bookId: string): Promise<BridgeResponse<{ bookId: string; opened: boolean }>>;
   removeBook(bookId: string): Promise<BridgeResponse<{ bookId: string; removed: boolean }>>;
 }
 
@@ -530,6 +541,7 @@ export interface BridgeConnection {
   floating: FloatingReaderControls;
   onBridgeError(callback: (payload: string) => void): void;
   onWindowStateChanged(callback: (state: { isMaximized: boolean; isFullScreen: boolean }) => void): void;
+  onWindowInteractionChanged(callback: (state: { surface: "main" | "floating"; active: boolean }) => void): () => void;
   onAppPreferencesChanged(callback: (preferences: AppPreferences) => void): void;
   onSpeechPreferencesChanged(callback: (speech: SpeechState) => void): void;
   onSoftwareUpdateChanged(callback: (state: SoftwareUpdateState) => void): void;

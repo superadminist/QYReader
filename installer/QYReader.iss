@@ -1,5 +1,5 @@
 #define MyAppName "启远阅读"
-#define MyAppVersion "2.1.1"
+#define MyAppVersion "2.1.2"
 #define MyAppPublisher "QYReader"
 #define MyAppExeName "QYReader.exe"
 

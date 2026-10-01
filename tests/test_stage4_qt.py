@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from PySide6.QtCore import QCoreApplication, QObject, QPoint, QRect, Qt
+from PySide6.QtCore import QCoreApplication, QObject, QRect, Qt
 
 from novelreader.floating_reader_service import (
     FloatingReaderError,
@@ -20,7 +20,7 @@ from novelreader.qt_host import (
     _apply_window_corners,
     _configure_floating_web_view,
     _configure_main_web_view,
-    _rounded_window_region,
+    _WindowRenderLifecycle,
     clamp_floating_geometry,
     floating_frontend_url,
     qt_geometry_string,
@@ -186,6 +186,9 @@ class Stage4FloatingServiceTests(unittest.TestCase):
 
             def showNormal(self):
                 pass  # Simulate the Qt translucent-window failure.
+
+            def _schedule_surface_sync(self):
+                pass
 
             def isMaximized(self):
                 return self.maximized
@@ -383,12 +386,124 @@ class Stage4FloatingServiceTests(unittest.TestCase):
         self.assertEqual(main.clear_count, 1)
         self.assertEqual(preference.call_count, 2)
 
-    def test_rounded_window_region_preserves_edges_and_excludes_corner_pixels(self):
-        region = _rounded_window_region(100, 80, 20)
-        self.assertTrue(region.contains(QPoint(50, 0)))
-        self.assertTrue(region.contains(QPoint(0, 40)))
-        self.assertTrue(region.contains(QPoint(50, 40)))
-        self.assertFalse(region.contains(QPoint(0, 0)))
+    def test_live_resize_does_not_clamp_or_persist_until_finished(self):
+        harness = _FloatingGeometryHarness(QRect(9000, 9000, 640, 320), [QRect(0, 0, 1280, 720)])
+        harness._system_interaction_active = True
+        FloatingReaderWindow._persist_geometry(harness)
+        self.assertEqual(harness.set_count, 0)
+        self.assertEqual(harness.bridge.saved, [])
+        harness._system_interaction_active = False
+        FloatingReaderWindow._persist_geometry(harness)
+        self.assertEqual(harness.set_count, 1)
+        self.assertEqual(len(harness.bridge.saved), 1)
+
+    def test_interaction_signal_and_geometry_timer_follow_native_loop(self):
+        class Harness:
+            _system_interaction_active = False
+            _surface = "floating"
+            _geometry_timer = mock.Mock()
+            bridge = mock.Mock()
+            _schedule_surface_sync = mock.Mock()
+
+        window = Harness()
+        _WindowRenderLifecycle._set_system_interaction(window, True)
+        _WindowRenderLifecycle._set_system_interaction(window, True)
+        self.assertEqual(window._geometry_timer.stop.call_count, 1)
+        window._geometry_timer.start.assert_not_called()
+        _WindowRenderLifecycle._set_system_interaction(window, False)
+        self.assertEqual(window.bridge.windowInteractionChanged.emit.call_args_list,
+                         [mock.call("floating", True), mock.call("floating", False)])
+        window._geometry_timer.start.assert_called_once()
+        window._schedule_surface_sync.assert_called_once()
+
+    def test_same_topmost_setting_does_not_recreate_visible_window(self):
+        class Harness:
+            _settings = {}
+            isVisible = mock.Mock(return_value=True)
+            windowFlags = mock.Mock(return_value=Qt.WindowType.WindowStaysOnTopHint)
+            setWindowFlag = mock.Mock()
+            show = mock.Mock()
+
+        window = Harness()
+        FloatingReaderWindow.apply_settings(window, {"topmost": True, "fontSize": 28})
+        self.assertEqual(window._settings["fontSize"], 28)
+        window.setWindowFlag.assert_not_called()
+        window.show.assert_not_called()
+
+    def test_closing_or_hiding_mid_interaction_clears_state_and_pending_timers(self):
+        class Harness:
+            _system_interaction_active = True
+            _surface = "floating"
+            _geometry_timer = mock.Mock()
+            _render_timer = mock.Mock()
+            bridge = mock.Mock()
+            _schedule_surface_sync = mock.Mock()
+
+            def _set_system_interaction(self, active):
+                _WindowRenderLifecycle._set_system_interaction(self, active)
+
+        window = Harness()
+        _WindowRenderLifecycle._cancel_window_interaction(window)
+        self.assertFalse(window._system_interaction_active)
+        window.bridge.windowInteractionChanged.emit.assert_called_once_with("floating", False)
+        window._render_timer.stop.assert_called_once()
+        self.assertEqual(window._geometry_timer.stop.call_count, 2)
+
+    def test_surface_sync_corrects_stale_view_geometry_then_repaints(self):
+        class Harness:
+            _system_interaction_active = False
+            _view = mock.Mock()
+            _page = mock.Mock()
+            _surface = "main"
+            layout = mock.Mock()
+            update = mock.Mock()
+
+            def contentsRect(self):
+                return QRect(0, 0, 1200, 700)
+
+        window = Harness()
+        window._view.geometry.return_value = QRect(0, 0, 600, 700)
+        with mock.patch.dict("os.environ", {"DD_QA_TRACE": ""}):
+            _WindowRenderLifecycle._sync_web_surface(window)
+        window._view.setGeometry.assert_called_once_with(QRect(0, 0, 1200, 700))
+        window._view.update.assert_called_once()
+        window.update.assert_called_once()
+        window._page.runJavaScript.assert_called_once()
+
+    def test_source_reveal_uses_argument_array_and_rejects_missing_file(self):
+        with tempfile.TemporaryDirectory(prefix="中文 路径 ") as temporary:
+            source = Path(temporary) / "小说 内容.txt"
+            source.write_text("内容", encoding="utf-8")
+            with mock.patch("novelreader.qt_host.subprocess.Popen") as launch:
+                self.assertTrue(DesktopWindow.revealSourceFile(object(), str(source)))
+                launch.assert_called_once_with(["explorer.exe", "/select,", str(source.resolve())])
+                self.assertFalse(DesktopWindow.revealSourceFile(object(), str(source.with_name("不存在.txt"))))
+                self.assertEqual(launch.call_count, 1)
+
+    def test_import_picker_remembers_confirmed_directory_without_blocking_on_save_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = str(Path(temporary) / "书.txt")
+            window = mock.Mock()
+            window.bridge._app.import_directory.return_value = temporary
+            window.bridge._app.record_import_directory.side_effect = OSError("readonly")
+            with mock.patch("novelreader.qt_host.QFileDialog.getOpenFileNames", return_value=([source], "")) as picker:
+                self.assertEqual(DesktopWindow._select_import_files(window), [source])
+                self.assertEqual(picker.call_args.args[2], temporary)
+                window.bridge._app.record_import_directory.assert_called_once_with(temporary)
+            window.bridge._app.record_import_directory.reset_mock()
+            with mock.patch("novelreader.qt_host.QFileDialog.getOpenFileNames", return_value=([], "")):
+                self.assertEqual(DesktopWindow._select_import_files(window), [])
+            window.bridge._app.record_import_directory.assert_not_called()
+
+    def test_import_picker_invalid_saved_directory_falls_back_to_documents_then_home(self):
+        window = mock.Mock()
+        window.bridge._app.import_directory.return_value = "Z:/missing/user/directory"
+        with tempfile.TemporaryDirectory() as temporary:
+            for documents, expected in ((temporary, temporary), ("Z:/missing/documents", str(Path.home()))):
+                with mock.patch("novelreader.qt_host.QStandardPaths.writableLocation", return_value=documents), \
+                     mock.patch("novelreader.qt_host.QFileDialog.getOpenFileNames", return_value=([], "")) as picker:
+                    DesktopWindow._select_import_files(window)
+                    self.assertEqual(picker.call_args.args[2], expected)
 
     def test_live_persist_clamps_fully_offscreen_geometry_without_recursion(self):
         harness = _FloatingGeometryHarness(

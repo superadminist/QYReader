@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -94,6 +95,7 @@ class DesktopBridge(QObject):
     """The only native object exposed to the production frontend."""
 
     windowStateChanged = Signal(str)
+    windowInteractionChanged = Signal(str, bool)
     bridgeError = Signal(str)
     importProgress = Signal(str)
     importFinished = Signal(str)
@@ -175,7 +177,7 @@ class DesktopBridge(QObject):
     ) -> dict[str, Any]:
         return {
             "app": {"version": __version__},
-            "library": library or {"books": [], "total": 0},
+            "library": library or {"books": [], "total": 0, "sortMode": "recent"},
             "preferences": preferences or {
                 "theme": "护眼",
                 "colorScheme": "light",
@@ -366,6 +368,45 @@ class DesktopBridge(QObject):
         except Exception:
             LOGGER.exception("Unexpected error while removing library book")
             return self._error_response(empty, "LIBRARY_REMOVE_FAILED", "移除内容失败，请稍后重试。", True)
+
+    @Slot(result=str)
+    def getLibraryState(self) -> str:
+        try:
+            return self._ok_response(self._library.load_library())
+        except LibraryDataError as exc:
+            return self._error_response({"books": [], "total": 0, "sortMode": "recent"}, exc.code, exc.user_message)
+
+    @Slot(str, result=str)
+    def setLibrarySortMode(self, mode: str) -> str:
+        try:
+            return self._ok_response(self._library_editor.set_sort_mode(mode))
+        except LibraryRemoveError as exc:
+            return self._error_response({"books": [], "total": 0, "sortMode": "recent"}, exc.code, exc.user_message, exc.retryable)
+
+    @Slot(str, result=str)
+    def moveLibraryBook(self, request_json: str) -> str:
+        request = self._request_object(request_json)
+        empty = {"books": [], "total": 0, "sortMode": "manual"}
+        if request is None or set(request) != {"bookId", "beforeBookId"}:
+            return self._error_response(empty, "INVALID_REQUEST", "排序请求不正确。")
+        try:
+            return self._ok_response(self._library_editor.move_book(request["bookId"], request["beforeBookId"]))
+        except LibraryRemoveError as exc:
+            return self._error_response(empty, exc.code, exc.user_message, exc.retryable)
+
+    @Slot(str, result=str)
+    def revealLibrarySource(self, book_id: str) -> str:
+        empty = {"bookId": book_id, "opened": False}
+        try:
+            source = self._library_editor.source_file(book_id)
+            reveal = getattr(self._window, "revealSourceFile", None)
+            if not callable(reveal) or not reveal(source):
+                return self._error_response(empty, "SOURCE_OPEN_FAILED", "无法打开文件位置，请稍后重试。", True)
+            return self._ok_response({"bookId": book_id, "opened": True})
+        except LibraryRemoveError as exc:
+            return self._error_response(empty, exc.code, exc.user_message, exc.retryable)
+        except OSError:
+            return self._error_response(empty, "SOURCE_OPEN_FAILED", "无法打开文件位置，请稍后重试。", True)
 
     @Slot(str, result=str)
     def openReaderBook(self, book_id: str) -> str:

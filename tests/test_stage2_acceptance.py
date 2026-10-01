@@ -241,7 +241,7 @@ class Stage2AcceptanceTests(unittest.TestCase):
         payload = json.loads(self.bridge.getInitialState())
 
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["data"]["library"], {"books": [], "total": 0})
+        self.assertEqual(payload["data"]["library"], {"books": [], "total": 0, "sortMode": "recent"})
         self.assertEqual(_tree_manifest(self.data_root), before)
         self.assertFalse(library_path.exists())
 

@@ -46,7 +46,7 @@ function demoReaderWindow(sessionId, bookId, anchorOffset = 0) {
 
 const EMPTY_DATA = {
   app: { version: "2.1.1" },
-  library: { books: [], total: 0 },
+  library: { books: [], total: 0, sortMode: "recent" },
   preferences: { theme: "护眼", colorScheme: "light", autoOpenLast: true, closeToTray: false, autoCheckUpdates: true, startupBookId: "" },
   window: { isMaximized: false, isFullScreen: false },
   speech: {
@@ -141,7 +141,8 @@ function validBook(book) {
   return Boolean(
     book
     && Object.entries(BOOK_FIELDS).every(([field, type]) => typeof book[field] === type)
-    && (book.lastReadAt === null || typeof book.lastReadAt === "number"),
+    && (book.lastReadAt === null || typeof book.lastReadAt === "number")
+    && (book.canRevealSource === undefined || typeof book.canRevealSource === "boolean"),
   );
 }
 
@@ -265,7 +266,7 @@ export function createDemoInitialState() {
     ok: true,
     data: {
       ...EMPTY_DATA,
-      library: { books: DEMO_BOOKS.map((book) => ({ ...book })), total: DEMO_BOOKS.length },
+      library: { books: DEMO_BOOKS.map((book) => ({ ...book, canRevealSource: false })), total: DEMO_BOOKS.length, sortMode: "recent" },
     },
     error: null,
   };
@@ -289,6 +290,7 @@ export function parseInitialState(raw) {
     || typeof payload.data?.app?.version !== "string"
     || !validAppPreferences(payload.data?.preferences)
     || typeof payload.data.library.total !== "number"
+    || (payload.data.library.sortMode !== undefined && !["recent", "manual"].includes(payload.data.library.sortMode))
     || typeof payload.data?.window?.isMaximized !== "boolean"
     || typeof payload.data?.window?.isFullScreen !== "boolean"
     || !validSpeechState(payload.data?.speech)
@@ -623,6 +625,16 @@ function validLibraryRemove(data) {
   return Boolean(data && typeof data.bookId === "string" && data.bookId && data.removed === true);
 }
 
+function validLibraryState(data) {
+  return Boolean(data && Array.isArray(data.books) && data.books.every(validBook)
+    && nonNegativeInteger(data.total) && data.total === data.books.length
+    && ["recent", "manual"].includes(data.sortMode));
+}
+
+function validSourceReveal(data) {
+  return Boolean(data && typeof data.bookId === "string" && data.bookId && data.opened === true);
+}
+
 function validReaderPlaybackCommand(data) {
   return Boolean(data && typeof data.commandId === "string" && data.commandId && typeof data.accepted === "boolean");
 }
@@ -856,6 +868,21 @@ function nativeControls(nativeBridge) {
 
 function nativeLibrary(nativeBridge) {
   return {
+    async getState() {
+      return parseBridgeResponse(await invokeWithResult(nativeBridge, "getLibraryState"), validLibraryState);
+    },
+    async setSortMode(mode) {
+      if (!["recent", "manual"].includes(mode)) throw new BridgeProtocolError("排序方式无效。", "BRIDGE_INVALID_ARGUMENT");
+      return parseBridgeResponse(await invokeWithResult(nativeBridge, "setLibrarySortMode", [mode]), validLibraryState);
+    },
+    async moveBook(input) {
+      if (!input || typeof input.bookId !== "string" || !input.bookId || (input.beforeBookId !== null && (typeof input.beforeBookId !== "string" || !input.beforeBookId))) throw new BridgeProtocolError("排序请求无效。", "BRIDGE_INVALID_ARGUMENT");
+      return parseBridgeResponse(await invokeWithResult(nativeBridge, "moveLibraryBook", [JSON.stringify(input)]), validLibraryState);
+    },
+    async revealSource(bookId) {
+      if (typeof bookId !== "string" || !bookId) throw new BridgeProtocolError("书籍编号无效。", "BRIDGE_INVALID_ARGUMENT");
+      return parseBridgeResponse(await invokeWithResult(nativeBridge, "revealLibrarySource", [bookId]), validSourceReveal);
+    },
     async removeBook(bookId) {
       if (typeof bookId !== "string" || !bookId) throw new BridgeProtocolError("书籍编号无效。", "BRIDGE_INVALID_ARGUMENT");
       return parseBridgeResponse(await invokeWithResult(nativeBridge, "removeLibraryBook", [bookId]), validLibraryRemove);
@@ -984,6 +1011,12 @@ function createNativeConnection(nativeBridge, initialState) {
         }
       }, subscriptions);
     },
+    onWindowInteractionChanged(callback) {
+      return signalSubscription(nativeBridge.windowInteractionChanged, (surface, active) => {
+        if (["main", "floating"].includes(surface) && typeof active === "boolean") callback({ surface, active });
+        else reportProtocolError(new BridgeProtocolError("窗口交互状态无效。", "BRIDGE_INVALID_PAYLOAD"));
+      }, subscriptions);
+    },
     onAppPreferencesChanged(callback) {
       signalSubscription(nativeBridge.appPreferencesChanged, (raw) => {
         try {
@@ -1080,11 +1113,15 @@ function createNativeConnection(nativeBridge, initialState) {
 }
 
 function signalSubscription(signal, callback, subscriptions) {
-  if (!signal || typeof signal.connect !== "function") return;
+  if (!signal || typeof signal.connect !== "function") return () => {};
   signal.connect(callback);
-  subscriptions.push(() => {
-    if (typeof signal.disconnect === "function") signal.disconnect(callback);
-  });
+  let connected = true;
+  const unsubscribe = () => {
+    if (connected && typeof signal.disconnect === "function") signal.disconnect(callback);
+    connected = false;
+  };
+  subscriptions.push(unsubscribe);
+  return unsubscribe;
 }
 
 function createDemoConnection() {
@@ -1108,6 +1145,16 @@ function createDemoConnection() {
   let demoFloating = demoFloatingState();
   let demoSpeech = { ...initialState.data.speech, settings: { ...initialState.data.speech.settings } };
   let demoSoftwareUpdate = { ...initialState.data.softwareUpdate };
+  let demoManualOrder = initialState.data.library.books.map((book) => book.id);
+  const demoRecentOrder = [...demoManualOrder];
+  const demoLibraryState = () => {
+    const library = initialState.data.library;
+    const books = [...library.books];
+    if (library.sortMode === "manual") books.sort((a, b) => demoManualOrder.indexOf(a.id) - demoManualOrder.indexOf(b.id));
+    else books.sort((a, b) => (b.lastReadAt || 0) - (a.lastReadAt || 0) || demoRecentOrder.indexOf(a.id) - demoRecentOrder.indexOf(b.id));
+    library.books = books;
+    return { books, total: books.length, sortMode: library.sortMode };
+  };
 
   const emit = (callbacks, payload) => callbacks.forEach((callback) => callback(payload));
   const response = (data) => ({ schemaVersion: SCHEMA_VERSION, ok: true, data, error: null });
@@ -1126,9 +1173,13 @@ function createDemoConnection() {
       lastReadAt: Date.now() / 1000,
       totalChars: 0,
       coverUrl: `covers/library-${["indigo", "sage", "amber", "night"][initialState.data.library.books.length % 4]}.jpg`,
+      canRevealSource: false,
     };
+    demoManualOrder.push(id);
+    demoRecentOrder.unshift(id);
     initialState.data.library.books = [book, ...initialState.data.library.books];
     initialState.data.library.total = initialState.data.library.books.length;
+    demoLibraryState();
     return book;
   };
   const startJob = (items) => {
@@ -1283,7 +1334,24 @@ function createDemoConnection() {
       },
     },
     library: {
+      async getState() { return response(demoLibraryState()); },
+      async setSortMode(mode) {
+        if (!["recent", "manual"].includes(mode)) throw new BridgeProtocolError("排序方式无效。", "BRIDGE_INVALID_ARGUMENT");
+        initialState.data.library.sortMode = mode;
+        return response(demoLibraryState());
+      },
+      async moveBook(input) {
+        if (initialState.data.library.sortMode !== "manual") throw new BridgeProtocolError("请先切换到自定义排序。", "SORT_MODE_REQUIRED");
+        if (!input || !demoManualOrder.includes(input.bookId) || (input.beforeBookId !== null && !demoManualOrder.includes(input.beforeBookId))) throw new BridgeProtocolError("排序内容不存在。", "BOOK_NOT_FOUND");
+        if (input.bookId !== input.beforeBookId) {
+          demoManualOrder = demoManualOrder.filter((id) => id !== input.bookId);
+          demoManualOrder.splice(input.beforeBookId === null ? demoManualOrder.length : demoManualOrder.indexOf(input.beforeBookId), 0, input.bookId);
+        }
+        return response(demoLibraryState());
+      },
+      async revealSource() { throw new BridgeProtocolError("浏览器演示内容没有本地源文件。", "SOURCE_UNAVAILABLE"); },
       async removeBook(bookId) {
+        demoManualOrder = demoManualOrder.filter((id) => id !== bookId);
         const index = initialState.data.library.books.findIndex((book) => book.id === bookId);
         if (index < 0) throw new BridgeProtocolError("这项内容已不在内容库中。", "BOOK_NOT_FOUND");
         initialState.data.library.books.splice(index, 1);
@@ -1380,6 +1448,7 @@ function createDemoConnection() {
     },
     onBridgeError() {},
     onWindowStateChanged() {},
+    onWindowInteractionChanged() { return () => {}; },
     onAppPreferencesChanged(callback) { appPreferencesCallbacks.add(callback); },
     onSpeechPreferencesChanged(callback) { speechPreferencesCallbacks.add(callback); },
     onSoftwareUpdateChanged(callback) { softwareUpdateCallbacks.add(callback); },

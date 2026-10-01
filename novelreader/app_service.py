@@ -118,6 +118,14 @@ class AppPreferencesService:
             "lastCheckedAt": checked_at if isinstance(checked_at, str) else "",
         }
 
+    def import_directory(self) -> str:
+        settings = self._load().get("settings", {})
+        value = settings.get("last_import_dir", "") if isinstance(settings, dict) else ""
+        return value if isinstance(value, str) else ""
+
+    def record_import_directory(self, directory: str) -> None:
+        self._update_internal({"last_import_dir": directory})
+
     def record_update_check(self, checked_at: str) -> None:
         if not isinstance(checked_at, str) or not checked_at or len(checked_at) > 64:
             raise AppPreferencesError("INVALID_REQUEST", "更新时间记录不正确。")

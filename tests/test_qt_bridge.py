@@ -116,7 +116,7 @@ class DesktopBridgeTests(unittest.TestCase):
         self.assertEqual(payload["schemaVersion"], SCHEMA_VERSION)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["data"]["library"]["total"], 1)
-        self.assertEqual(payload["data"]["app"]["version"], "2.1.1")
+        self.assertEqual(payload["data"]["app"]["version"], "2.1.2")
         self.assertEqual(payload["data"]["preferences"]["theme"], "护眼")
         self.assertTrue(payload["data"]["preferences"]["autoOpenLast"])
         self.assertFalse(payload["data"]["preferences"]["closeToTray"])
@@ -138,6 +138,11 @@ class DesktopBridgeTests(unittest.TestCase):
         self.assertIn("startFileImport(QString)", signatures)
         self.assertIn("startPasteImport(QString)", signatures)
         self.assertIn("removeLibraryBook(QString)", signatures)
+        self.assertIn("getLibraryState()", signatures)
+        self.assertIn("setLibrarySortMode(QString)", signatures)
+        self.assertIn("moveLibraryBook(QString)", signatures)
+        self.assertIn("revealLibrarySource(QString)", signatures)
+        self.assertIn("windowInteractionChanged(QString,bool)", signatures)
         self.assertIn("cancelImport(QString)", signatures)
         self.assertIn("importProgress(QString)", signatures)
         self.assertIn("importFinished(QString)", signatures)
@@ -153,6 +158,31 @@ class DesktopBridgeTests(unittest.TestCase):
         self.assertIn("floatingPointerChanged(bool)", signatures)
         self.assertIn("toggleFullscreen()", signatures)
 
+    def test_library_management_slots_return_state_and_only_resolve_saved_sources(self):
+        from novelreader.library_service import LibraryQueryService
+        path = self.bridge._library.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"books": {
+            "a": {"path": os.fspath(self.source), "last_read_at": 1},
+            "b": {"last_read_at": 2}}, "settings": {"theme": "夜间"}}), encoding="utf-8")
+        self.bridge._library = LibraryQueryService(path)
+        initial = json.loads(self.bridge.getLibraryState())
+        self.assertEqual(initial["data"]["sortMode"], "recent")
+        self.assertTrue(json.loads(self.bridge.setLibrarySortMode("manual"))["ok"])
+        moved = json.loads(self.bridge.moveLibraryBook(json.dumps({"bookId": "a", "beforeBookId": "b"})))
+        self.assertEqual([item["id"] for item in moved["data"]["books"]], ["a", "b"])
+        self.window.revealSourceFile = lambda source: source == self.source.resolve()
+        opened = json.loads(self.bridge.revealLibrarySource("a"))
+        self.assertEqual(opened["data"], {"bookId": "a", "opened": True})
+        self.assertNotIn(os.fspath(self.source), json.dumps(opened))
+        unavailable = json.loads(self.bridge.revealLibrarySource("b"))
+        self.assertEqual(unavailable["error"]["code"], "SOURCE_UNAVAILABLE")
+        invalid = json.loads(self.bridge.moveLibraryBook('{"bookId":"a","path":"other-file"}'))
+        self.assertEqual(invalid["error"]["code"], "INVALID_REQUEST")
+        self.source.unlink()
+        missing = json.loads(self.bridge.revealLibrarySource("a"))
+        self.assertEqual(missing["error"]["code"], "SOURCE_NOT_FOUND")
+
     def test_library_error_is_a_safe_failure_envelope(self):
         class BrokenLibrary:
             def load_library(self):
@@ -161,7 +191,7 @@ class DesktopBridgeTests(unittest.TestCase):
         payload = json.loads(DesktopBridge(self.window, BrokenLibrary()).getInitialState())
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"]["code"], "LIBRARY_INVALID")
-        self.assertEqual(payload["data"]["library"], {"books": [], "total": 0})
+        self.assertEqual(payload["data"]["library"], {"books": [], "total": 0, "sortMode": "recent"})
 
     def test_remove_library_book_keeps_original_file(self):
         book_id = "remove-me"

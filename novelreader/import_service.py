@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from . import book_loader
 from .library_lock import library_write_lock
-from .library_service import default_library_path
+from .library_service import default_library_path, _manual_order
 from .storage import Storage
 
 
@@ -377,6 +377,11 @@ class LibraryImportService:
             self._validate_library_for_write()
             current_storage = Storage(os.fspath(self.library_path))
             try:
+                if current_storage.get_setting("library_sort_mode") == "manual":
+                    order = _manual_order(current_storage.data)
+                    if book_id not in order:
+                        order.append(book_id)
+                    current_storage.data["settings"]["library_manual_order"] = order
                 current_storage.add_book(metadata)
             except Exception as exc:
                 raise ImportServiceError(

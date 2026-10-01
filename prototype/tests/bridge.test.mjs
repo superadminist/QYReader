@@ -41,6 +41,40 @@ test("native library remove calls the dedicated desktop slot", async () => {
   connection.dispose();
 });
 
+test("native library sort and reveal use IDs, and resize subscriptions dispose", async () => {
+  const env = nativeEnvironment(createDemoInitialState());
+  const connection = await connectBridge({ window: env.browserWindow, document: null });
+  assert.equal((await connection.library.getState()).data.sortMode, "recent");
+  assert.equal((await connection.library.setSortMode("manual")).data.sortMode, "manual");
+  await connection.library.moveBook({ bookId: "demo-1", beforeBookId: null });
+  assert.equal((await connection.library.revealSource("demo-1")).data.opened, true);
+  assert.deepEqual(env.calls, [["getLibraryState"], ["setLibrarySortMode", "manual"],
+    ["moveLibraryBook", JSON.stringify({ bookId: "demo-1", beforeBookId: null })], ["revealLibrarySource", "demo-1"]]);
+  const events = [];
+  const unsubscribe = connection.onWindowInteractionChanged((event) => events.push(event));
+  env.nativeBridge.windowInteractionChanged.emit("floating", true);
+  assert.deepEqual(events, [{ surface: "floating", active: true }]);
+  unsubscribe();
+  env.nativeBridge.windowInteractionChanged.emit("floating", false);
+  assert.equal(events.length, 1);
+  connection.dispose();
+  assert.equal(env.nativeBridge.windowInteractionChanged.size, 0);
+});
+
+test("demo manual order survives mode switches and supports append moves", async () => {
+  const connection = await connectBridge({ window: {}, document: null });
+  const original = (await connection.library.getState()).data.books.map((book) => book.id);
+  await connection.library.setSortMode("manual");
+  await connection.library.moveBook({ bookId: original[0], beforeBookId: null });
+  const manual = [...original.slice(1), original[0]];
+  assert.deepEqual((await connection.library.getState()).data.books.map((book) => book.id), manual);
+  assert.deepEqual((await connection.library.setSortMode("recent")).data.books.map((book) => book.id), original);
+  assert.deepEqual((await connection.library.setSortMode("manual")).data.books.map((book) => book.id), manual);
+  await assert.rejects(connection.library.moveBook({ bookId: "missing", beforeBookId: null }), /不存在/);
+  await assert.rejects(connection.library.revealSource(original[0]), /本地源文件/);
+  connection.dispose();
+});
+
 test("reader text range resolves an exact Unicode character offset", () => {
   const block = {
     nodeType: 1,
@@ -97,7 +131,7 @@ function signal() {
   return {
     connect(callback) { callbacks.add(callback); },
     disconnect(callback) { callbacks.delete(callback); },
-    emit(payload) { callbacks.forEach((callback) => callback(payload)); },
+    emit(...payload) { callbacks.forEach((callback) => callback(...payload)); },
     get size() { return callbacks.size; },
   };
 }
@@ -135,6 +169,7 @@ function nativeEnvironment(response) {
   const nativeBridge = {
     bridgeError: signal(),
     windowStateChanged: signal(),
+    windowInteractionChanged: signal(),
     appPreferencesChanged: signal(),
     speechPreferencesChanged: signal(),
     softwareUpdateChanged: signal(),
@@ -178,6 +213,10 @@ function nativeEnvironment(response) {
       callback(ok({ jobId, cancelRequested: true }));
     },
     removeLibraryBook(bookId, callback) { calls.push(["removeLibraryBook", bookId]); callback(ok({ bookId, removed: true })); },
+    getLibraryState(callback) { calls.push(["getLibraryState"]); callback(ok(response.data.library)); },
+    setLibrarySortMode(mode, callback) { calls.push(["setLibrarySortMode", mode]); callback(ok({ ...response.data.library, sortMode: mode })); },
+    moveLibraryBook(input, callback) { calls.push(["moveLibraryBook", input]); callback(ok({ ...response.data.library, sortMode: "manual" })); },
+    revealLibrarySource(bookId, callback) { calls.push(["revealLibrarySource", bookId]); callback(ok({ bookId, opened: true })); },
     openReaderBook(bookId, callback) { calls.push(["openReaderBook", bookId]); callback(ok({ requestId: "reader-request", bookId, state: "loading" })); },
     getReaderWindow(input, callback) { calls.push(["getReaderWindow", input]); callback(ok(readerFixture().window)); },
     navigateReader(input, callback) { calls.push(["navigateReader", input]); const fixture = readerFixture(); callback(ok({ position: fixture.position, window: fixture.window, playback: fixture.playback })); },
@@ -750,14 +789,14 @@ test("floating reader keeps chrome tied to pointer while the switch only control
   assert.match(css, /--floating-footer-row: 0px;/);
   assert.match(css, /\.native-floating-surface\[data-interaction-visible="true"\] \{[\s\S]*--floating-header-row: 48px;[\s\S]*--floating-footer-row: 58px;/);
   assert.match(css, /\.native-floating-surface \.floating-dragbar,[\s\S]*visibility: hidden;[\s\S]*pointer-events: none;/);
-  assert.match(css, /\.native-floating-surface\[data-pointer-inside="true"\] \.floating-sentence\.previous,[\s\S]*\.native-floating-surface\[data-pointer-inside="true"\] \.floating-sentence\.next,/);
+  assert.match(css, /\.native-floating-surface\[data-interaction-visible="true"\] \.floating-sentence\.previous,[\s\S]*\.native-floating-surface\[data-interaction-visible="true"\] \.floating-sentence\.next,/);
   assert.match(css, /@media \(hover: none\)[\s\S]*--floating-header-row: 48px;[\s\S]*--floating-footer-row: 58px;/);
   assert.match(css, /\.native-floating-surface\[data-hover-display-enabled="false"\] \.floating-sentence\.previous,[\s\S]*\.floating-sentence\.next \{ display: none; \}/);
   assert.match(app, /const \[pointerInside, setPointerInside\] = useState\(false\);/);
   assert.match(app, /connection\.onFloatingPointerChanged\(\(inside\) =>/);
-  assert.match(app, /const interactionVisible = pointerInside;/);
+  assert.match(app, /const interactionVisible = resizing \? pointerBeforeResizeRef\.current : pointerInside;/);
   assert.doesNotMatch(app, /const interactionVisible = !hoverDisplayEnabled/);
-  assert.match(app, /root\.dataset\.contextMode = "all";\s*if \(hoverDisplayEnabled && !pointerInside\)/);
+  assert.match(app, /root\.dataset\.contextMode = "all";\s*if \(hoverDisplayEnabled && !interactionVisible\)/);
   assert.match(app, /data-pointer-inside=\{pointerInside \? "true" : "false"\}/);
   assert.match(app, /data-hover-display-enabled=\{hoverDisplayEnabled \? "true" : "false"\}/);
   assert.match(app, /鼠标移开时显示上一段和下一段/);

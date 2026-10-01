@@ -6,11 +6,13 @@ from __future__ import annotations
 import ctypes
 import os
 import re
+import subprocess
 import sys
+from ctypes import wintypes
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QFile, QIODevice, QRect, QTimer, Qt, QUrl, QUrlQuery
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QGuiApplication, QIcon, QRegion
+from PySide6.QtCore import QEvent, QFile, QIODevice, QRect, QStandardPaths, QTimer, Qt, QUrl, QUrlQuery
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QGuiApplication, QIcon
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import (
     QWebEnginePage,
@@ -157,71 +159,105 @@ def _set_windows_corner_preference(window: QMainWindow, rounded: bool) -> bool:
         return False
 
 
-def _rounded_window_region(width: int, height: int, radius: int) -> QRegion:
-    """Build a stable rounded region for an opaque Windows 10 top-level window."""
-    width = max(1, int(width))
-    height = max(1, int(height))
-    radius = max(0, min(int(radius), width // 2, height // 2))
-    if radius == 0:
-        return QRegion(0, 0, width, height)
-    diameter = radius * 2
-    region = QRegion(radius, 0, width - diameter, height)
-    region |= QRegion(0, radius, width, height - diameter)
-    ellipse = QRegion.RegionType.Ellipse
-    region |= QRegion(0, 0, diameter, diameter, ellipse)
-    region |= QRegion(width - diameter, 0, diameter, diameter, ellipse)
-    region |= QRegion(0, height - diameter, diameter, diameter, ellipse)
-    region |= QRegion(width - diameter, height - diameter, diameter, diameter, ellipse)
-    return region
-
-
-def _suspend_window_corner_mask(window: QMainWindow) -> None:
-    if not getattr(window, "_dd_corner_mask_active", False):
-        return
-    window.clearMask()
-    window._dd_corner_mask_active = False
-    window._dd_corner_state = None
-
-
 def _apply_window_corners(
     window: QMainWindow,
     radius: int,
     rounded: bool,
-    *,
-    allow_opaque_mask: bool = False,
 ) -> None:
     # resizeEvent fires continuously while the user drags a window edge. On a
     # translucent WebEngine top-level window, repeatedly clearing the mask and
     # asking DWM to re-apply the same preference invalidates the compositor
     # surface and can make the entire window disappear for a frame. Corner mode
     # changes only when entering/leaving maximized or fullscreen state.
-    mask_size = (int(window.width()), int(window.height())) if rounded and allow_opaque_mask else None
-    corner_state = (bool(rounded), int(radius), bool(allow_opaque_mask), mask_size)
+    corner_state = (bool(rounded), int(radius))
     if getattr(window, "_dd_corner_state", None) == corner_state:
         return
     window._dd_corner_state = corner_state
-    if not rounded:
-        window.clearMask()
-        window._dd_corner_mask_active = False
-        _set_windows_corner_preference(window, False)
-        return
-    if _set_windows_corner_preference(window, True) or not allow_opaque_mask:
-        window.clearMask()
-        window._dd_corner_mask_active = False
-        return
-    # Windows 10 has no DWMWA_WINDOW_CORNER_PREFERENCE.  Only the opaque main
-    # window uses this fallback, and it is applied after live resize settles so
-    # the region never invalidates every compositor frame.  The translucent
-    # floating window continues to use its smoother CSS anti-aliased corners.
-    window.setMask(_rounded_window_region(window.width(), window.height(), radius))
-    window._dd_corner_mask_active = True
+    # CSS owns antialiasing and clipping at every size; never create a binary
+    # native region that becomes stale halfway through a system resize.
+    window.clearMask()
+    _set_windows_corner_preference(window, rounded)
 
 
-class FloatingReaderWindow(QMainWindow):
+class _WindowRenderLifecycle:
+    """Keep Chromium layout and the native resize loop on the same lifecycle."""
+
+    def _init_render_lifecycle(self, surface: str) -> None:
+        self._surface = surface
+        self._system_interaction_active = False
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._sync_web_surface)
+
+    def nativeEvent(self, event_type, message):
+        if sys.platform == "win32" and hasattr(self, "_render_timer"):
+            native_message = wintypes.MSG.from_address(int(message)).message
+            if native_message == 0x0231:  # WM_ENTERSIZEMOVE
+                self._set_system_interaction(True)
+            elif native_message == 0x0232:  # WM_EXITSIZEMOVE
+                self._set_system_interaction(False)
+        return super().nativeEvent(event_type, message)
+
+    def hideEvent(self, event) -> None:
+        self._cancel_window_interaction()
+        super().hideEvent(event)
+
+    def _cancel_window_interaction(self) -> None:
+        if getattr(self, "_system_interaction_active", False):
+            self._set_system_interaction(False)
+        for name in ("_geometry_timer", "_render_timer"):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                timer.stop()
+
+    def _set_system_interaction(self, active: bool) -> None:
+        if self._system_interaction_active == active:
+            return
+        self._system_interaction_active = active
+        geometry_timer = getattr(self, "_geometry_timer", None)
+        if geometry_timer is not None:
+            geometry_timer.stop()
+        signal = getattr(getattr(self, "bridge", None), "windowInteractionChanged", None)
+        if signal is not None:
+            signal.emit(self._surface, active)
+        _qa_trace(f"window-interaction:{self._surface}:{active}")
+        if not active:
+            if geometry_timer is not None:
+                geometry_timer.start()
+            self._schedule_surface_sync()
+
+    def _schedule_surface_sync(self) -> None:
+        if hasattr(self, "_render_timer") and not self._system_interaction_active:
+            self._render_timer.start(0)
+
+    def _sync_web_surface(self) -> None:
+        if not hasattr(self, "_view") or self._system_interaction_active:
+            return
+        layout = self.layout()
+        if layout is not None:
+            layout.activate()
+        # Both hosts have only a central web view, without menus or status bars.
+        # Correct stale backing-store dimensions after native state transitions.
+        rect = self.contentsRect()
+        if self._view.geometry() != rect:
+            self._view.setGeometry(rect)
+        self._view.update()
+        self.update()
+        self._page.runJavaScript("window.dispatchEvent(new Event('resize'))")
+        if os.environ.get("DD_QA_TRACE"):
+            _qa_trace(f"window-render:{self._surface}:client={rect}:view={self._view.geometry()}:state={self.windowState()}")
+            self._page.runJavaScript(
+                "JSON.stringify({width:innerWidth,height:innerHeight,dpr:devicePixelRatio})",
+                lambda viewport: _qa_trace(f"window-viewport:{self._surface}:{viewport}"),
+            )
+
+
+class FloatingReaderWindow(_WindowRenderLifecycle, QMainWindow):
     """Independent frameless React window sharing the main window's bridge."""
 
     def __init__(self, bridge: DesktopBridge, profile: QWebEngineProfile):
         super().__init__(None)
+        self._init_render_lifecycle("floating")
         self.bridge = bridge
         self._profile = profile
         self._allow_close = False
@@ -262,6 +298,7 @@ class FloatingReaderWindow(QMainWindow):
         self.apply_settings(settings)
         self.bridge.floatingPointerChanged.emit(False)
         self.show()
+        self._schedule_surface_sync()
         _apply_window_corners(self, 30, True)
         if settings.get("topmost", True):
             self.raise_()
@@ -270,13 +307,18 @@ class FloatingReaderWindow(QMainWindow):
     def apply_settings(self, settings: dict) -> None:
         self._settings = dict(settings)
         was_visible = self.isVisible()
+        topmost = bool(settings.get("topmost", True))
+        if bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint) == topmost:
+            return
         self.setWindowFlag(
             Qt.WindowType.WindowStaysOnTopHint,
-            bool(settings.get("topmost", True)),
+            topmost,
         )
+        self._dd_corner_state = None  # Window flags may create a new HWND.
         if was_visible:
             self.show()
             QTimer.singleShot(0, lambda: _apply_window_corners(self, 30, True))
+            self._schedule_surface_sync()
 
     def ensure_visible_after_main_minimize(self) -> None:
         if self.isVisible():
@@ -285,13 +327,14 @@ class FloatingReaderWindow(QMainWindow):
                 self.raise_()
 
     def shutdown(self) -> None:
-        self._geometry_timer.stop()
+        self._cancel_window_interaction()
         if self.isVisible():
             self._persist_geometry()
         self._allow_close = True
         self.close()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._cancel_window_interaction()
         if self._allow_close:
             event.accept()
             return
@@ -315,19 +358,26 @@ class FloatingReaderWindow(QMainWindow):
         if (
             hasattr(self, "_geometry_timer")
             and not self._applying_geometry_clamp
+            and not self._system_interaction_active
         ):
             self._geometry_timer.start()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        if not hasattr(self, "_render_timer"):
+            return
         _apply_window_corners(self, 30, True)
         if (
             hasattr(self, "_geometry_timer")
             and not self._applying_geometry_clamp
+            and not self._system_interaction_active
         ):
             self._geometry_timer.start()
+        self._schedule_surface_sync()
 
     def _persist_geometry(self) -> None:
+        if getattr(self, "_system_interaction_active", False):
+            return
         rect = clamp_floating_geometry(
             qt_geometry_string(self.geometry()), self._available_work_areas()
         )
@@ -345,9 +395,10 @@ class FloatingReaderWindow(QMainWindow):
         return [item.availableGeometry() for item in screens]
 
 
-class DesktopWindow(QMainWindow):
+class DesktopWindow(_WindowRenderLifecycle, QMainWindow):
     def __init__(self, library: LibraryQueryService | None = None):
         super().__init__()
+        self._init_render_lifecycle("main")
         _qa_trace("desktop-window:start")
         self.setWindowTitle("启远阅读")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
@@ -490,6 +541,7 @@ class DesktopWindow(QMainWindow):
         self.restoreNormalWindow()
         self.raise_()
         self.activateWindow()
+        self._schedule_surface_sync()
 
     def restoreNormalWindow(self) -> None:
         self.showNormal()
@@ -500,6 +552,7 @@ class DesktopWindow(QMainWindow):
             ctypes.windll.user32.ShowWindow(ctypes.c_void_p(int(self.winId())), 9)
             self.setWindowState(Qt.WindowState.WindowNoState)
             self.bridge.emitWindowState()
+        self._schedule_surface_sync()
 
     def hideMainForFloating(self) -> None:
         self.hide()
@@ -521,13 +574,39 @@ class DesktopWindow(QMainWindow):
 
     def _select_import_files(self) -> list[str]:
         patterns = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_EXTS))
+        try:
+            saved_directory = self.bridge._app.import_directory()
+        except Exception:
+            saved_directory = ""
+        directory = Path(saved_directory) if saved_directory else None
+        if directory is None or not directory.is_dir():
+            documents = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+            directory = Path(documents) if documents and Path(documents).is_dir() else Path.home()
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             "选择要加入书架的小说（可多选）",
-            "",
+            os.fspath(directory),
             f"支持的小说格式 ({patterns});;所有文件 (*)",
         )
+        if paths:
+            try:
+                self.bridge._app.record_import_directory(os.fspath(Path(paths[0]).parent))
+            except Exception:
+                # Preference persistence must not reject files already selected.
+                _qa_trace("import-directory:save-failed")
         return paths
+
+    def revealSourceFile(self, path: str) -> bool:
+        source = Path(path).resolve()
+        if not source.is_file():
+            return False
+        if sys.platform == "win32":
+            try:
+                subprocess.Popen(["explorer.exe", "/select,", os.fspath(source)])
+                return True
+            except OSError:
+                return False
+        return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(os.fspath(source.parent))))
 
     def showFloatingReaderWindow(self, settings: dict) -> None:
         if self._floating_window is None:
@@ -566,6 +645,7 @@ class DesktopWindow(QMainWindow):
         window.deleteLater()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._cancel_window_interaction()
         self._exit_requested = True
         if self._tray is not None:
             self._tray.hide()
@@ -581,22 +661,26 @@ class DesktopWindow(QMainWindow):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange and hasattr(self, "bridge"):
             QTimer.singleShot(0, self._sync_window_corners)
+            self._schedule_surface_sync()
             self.bridge.emitWindowState()
             if self.isMinimized() and self._floating_window is not None:
                 self._floating_window.ensure_visible_after_main_minimize()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._schedule_surface_sync()
+        if not hasattr(self, "_corner_timer"):
+            return
         if self.isMaximized() or self.isFullScreen():
             self._corner_timer.stop()
             self._sync_window_corners()
             return
-        _suspend_window_corner_mask(self)
         self._corner_timer.start()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         QTimer.singleShot(0, self._sync_window_corners)
+        self._schedule_surface_sync()
 
     def _sync_window_corners(self) -> None:
         rounded = not self.isMaximized() and not self.isFullScreen()

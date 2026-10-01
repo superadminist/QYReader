@@ -123,6 +123,9 @@ DEFAULT_SETTINGS = {
     "floating_reader_text_color": "auto",
     "floating_reader_hover_display": True,
     "library_view_mode": "grid",
+    "library_sort_mode": "recent",
+    "library_manual_order": [],
+    "last_import_dir": "",
 }
 
 
