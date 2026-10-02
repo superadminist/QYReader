@@ -448,7 +448,7 @@ class DesktopWindow(_WindowRenderLifecycle, QMainWindow):
         self._speech = SpeechController()
         _qa_trace("desktop-window:speech-created")
         self._playback = PlaybackService(self._speech)
-        self._reader = ReaderService(library.path)
+        self._reader = ReaderService(library.path, deferred_progress=True)
         self.bridge = DesktopBridge(
             self,
             library,

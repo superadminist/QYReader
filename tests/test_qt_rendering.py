@@ -4,8 +4,8 @@ from novelreader.qt_rendering import configure_rendering
 
 
 class QtRenderingTests(unittest.TestCase):
-    def test_windows_disables_both_gpu_composition_layers_without_unsafe_flags(self):
-        environment = {"QTWEBENGINE_CHROMIUM_FLAGS": '--remote-allow-origins=* --custom="two words"'}
+    def test_explicit_software_mode_disables_both_layers_without_unsafe_flags(self):
+        environment = {"QYREADER_RENDER_MODE": "software", "QTWEBENGINE_CHROMIUM_FLAGS": '--remote-allow-origins=* --custom="two words"'}
         self.assertEqual(configure_rendering(environment, "win32"), "software")
         self.assertEqual(environment["QT_QUICK_BACKEND"], "software")
         self.assertEqual(environment["QTWEBENGINE_CHROMIUM_FLAGS"],
@@ -16,14 +16,16 @@ class QtRenderingTests(unittest.TestCase):
         configure_rendering(environment, "win32")
         self.assertEqual(environment, before)
 
-    def test_other_platforms_and_diagnostic_hardware_mode_preserve_environment(self):
-        for platform, environment in (("linux", {}), ("win32", {"QYREADER_RENDER_MODE": "hardware"})):
+    def test_default_and_explicit_hardware_mode_preserve_environment(self):
+        for platform, environment in (("linux", {}), ("win32", {}),
+                                      ("win32", {"QYREADER_RENDER_MODE": "hardware"}),
+                                      ("win32", {"QTWEBENGINE_CHROMIUM_FLAGS": "--custom", "QT_QUICK_BACKEND": "custom"})):
             before = dict(environment)
             self.assertEqual(configure_rendering(environment, platform), "system")
             self.assertEqual(environment, before)
 
     def test_existing_disable_gpu_is_not_duplicated(self):
-        environment = {"QTWEBENGINE_CHROMIUM_FLAGS": "--disable-gpu --remote-allow-origins=*"}
+        environment = {"QYREADER_RENDER_MODE": "software", "QTWEBENGINE_CHROMIUM_FLAGS": "--disable-gpu --remote-allow-origins=*"}
         configure_rendering(environment, "win32")
         self.assertEqual(environment["QTWEBENGINE_CHROMIUM_FLAGS"], "--disable-gpu --remote-allow-origins=*")
 

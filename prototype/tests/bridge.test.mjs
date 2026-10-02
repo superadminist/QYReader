@@ -208,6 +208,10 @@ function nativeEnvironment(response) {
       calls.push(["startPasteImport", input]);
       callback(ok({ jobId: "job-paste", state: "queued" }));
     },
+    startWebImport(input, callback) {
+      calls.push(["startWebImport", input]);
+      callback(ok({ jobId: "job-web", state: "queued" }));
+    },
     cancelImport(jobId, callback) {
       calls.push(["cancelImport", jobId]);
       callback(ok({ jobId, cancelRequested: true }));
@@ -407,6 +411,24 @@ test("native import controls use the frozen slot names and serialize inputs", as
     ["startPasteImport", JSON.stringify({ title: "标题", text: "正文" })],
     ["cancelImport", "job-file"],
   ]);
+});
+
+test("native web import delegates the URL and validates job responses", async () => {
+  const env = nativeEnvironment(createDemoInitialState());
+  const connection = await connectBridge({ window: env.browserWindow, document: null });
+  const input = { url: "https://example.com/article" };
+  assert.equal((await connection.imports.startWebImport(input)).data.jobId, "job-web");
+  assert.deepEqual(env.calls, [["startWebImport", JSON.stringify(input)]]);
+  await assert.rejects(connection.imports.startWebImport({ url: "" }), /不能为空/);
+  connection.dispose();
+});
+
+test("demo web import explains the desktop requirement without inventing an article", async () => {
+  const connection = await connectBridge({ window: {}, document: null });
+  const before = connection.initialState.data.library.books.length;
+  await assert.rejects(connection.imports.startWebImport({ url: "https://example.com/article" }), /桌面应用/);
+  assert.equal(connection.initialState.data.library.books.length, before);
+  connection.dispose();
 });
 
 test("native reader controls use the frozen slots and serialize complex inputs", async () => {

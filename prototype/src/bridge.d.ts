@@ -202,6 +202,7 @@ export interface ImportControls {
     text: string;
   }): Promise<BridgeResponse<ImportStartData>>;
   cancelImport(jobId: string): Promise<BridgeResponse<ImportCancelData>>;
+  startWebImport(input: { url: string }): Promise<BridgeResponse<ImportStartData>>;
 }
 
 export interface ReaderPosition {

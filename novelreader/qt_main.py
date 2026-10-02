@@ -27,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setOrganizationName("QYReader")
 
     try:
-        ensure_data_dir()
+        data_root = ensure_data_dir()
     except OSError as exc:
         QMessageBox.critical(
             None,
@@ -37,6 +37,14 @@ def main(argv: list[str] | None = None) -> int:
             f"{exc}",
         )
         return 4
+
+    try:
+        from .tts_engine import configure_edge_diagnostics
+        configure_edge_diagnostics(data_root)
+    except OSError:
+        # Diagnostics must never prevent the reader from starting. Playback
+        # events still carry the same sanitized failure details in memory.
+        pass
 
     index_path = frontend_index_path()
     if not index_path.is_file():

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   ArrowLeft,
   Article,
@@ -64,7 +64,7 @@ const DEFAULT_APP_PREFERENCES = {
 
 const DEFAULT_SOFTWARE_UPDATE = {
   status: "idle",
-  currentVersion: "2.1.1",
+  currentVersion: "2.1.5",
   latestVersion: "",
   lastCheckedAt: "",
   message: "尚未检查更新。",
@@ -257,7 +257,7 @@ const paragraphs = [
 
 function IconButton({ label, children, active = false, disabled = false, onClick, className = "" }) {
   return (
-    <button className={`icon-button ${active ? "active" : ""} ${className}`} aria-label={label} title={label} disabled={disabled} onClick={onClick}>
+    <button type="button" className={`icon-button ${active ? "active" : ""} ${className}`} aria-label={label} title={label} disabled={disabled} onClick={onClick}>
       {children}
     </button>
   );
@@ -310,7 +310,15 @@ function WindowTitlebar({ controls, desktopMode, windowState }) {
   );
 }
 
-function Library({
+function useStableActions(actions) {
+  // Events always use the last committed application state while retaining
+  // their identity, so playback ticks do not invalidate the library memo.
+  const current = useRef(actions);
+  useLayoutEffect(() => { current.current = actions; });
+  return useMemo(() => Object.fromEntries(Object.keys(actions).map((key) => [key, (...args) => current.current[key](...args)])), []);
+}
+
+const Library = memo(function Library({
   books,
   sortMode,
   setSortMode,
@@ -321,6 +329,7 @@ function Library({
   openBook,
   removeBook,
   openPaste,
+  openWeb,
   selectFiles,
   showUnavailable,
   capabilities,
@@ -345,13 +354,75 @@ function Library({
   const gestureRef = useRef(null);
   const suppressOpenRef = useRef(false);
   const previousRectsRef = useRef(new Map());
+  const [gridViewport, setGridViewport] = useState({ columns: 4, rowHeight: 400, top: 0, height: 800 });
+  const virtualLibrary = sortMode !== "manual" && books.length > 512;
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const orderedBooks = draftBooks || books;
-  const visibleBooks = normalizedQuery
+  const visibleBooks = useMemo(() => normalizedQuery
     ? orderedBooks.filter((book) => book.title.toLocaleLowerCase().includes(normalizedQuery))
-    : orderedBooks;
+    : orderedBooks, [orderedBooks, normalizedQuery]);
   const canDrag = sortMode === "manual" && !normalizedQuery && !loading && !sortPending;
+  const totalRows = Math.ceil(visibleBooks.length / gridViewport.columns);
+  // Keep several screens mounted and advance in batches. The software Qt
+  // compositor otherwise rasterizes newly mounted covers on every scroll row.
+  const firstRow = virtualLibrary ? Math.min(Math.max(0, totalRows - 1), Math.max(0, Math.floor(gridViewport.top / gridViewport.rowHeight / 8) * 8 - 8)) : 0;
+  const endRow = virtualLibrary ? Math.min(totalRows, Math.ceil((gridViewport.top + gridViewport.height) / gridViewport.rowHeight / 8) * 8 + 8) : totalRows;
+  const renderedBooks = virtualLibrary ? visibleBooks.slice(firstRow * gridViewport.columns, Math.max(firstRow + 1, endRow) * gridViewport.columns) : visibleBooks;
+  useEffect(() => {
+    if (typeof IntersectionObserver === "undefined") return;
+    const cards = gridRef.current?.querySelectorAll(".book-card") || [];
+    const visible = new Set();
+    let timer;
+    const warm = () => {
+      // Never rebuild layers during a scroll gesture. Only retain the expensive
+      // cover image while the viewport is settled; shadows/buttons stay automatic.
+      for (const card of cards) card.classList.toggle("motion-ready", visible.has(card));
+    };
+    const schedule = () => { clearTimeout(timer); timer = setTimeout(warm, 180); };
+    const observer = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) visible.add(entry.target);
+        else visible.delete(entry.target);
+      }
+      schedule();
+    }, { root: pageRef.current });
+    for (const card of cards) observer.observe(card);
+    const page = pageRef.current;
+    page.addEventListener("scroll", schedule, { passive: true });
+    return () => {
+      clearTimeout(timer);
+      observer.disconnect();
+      page.removeEventListener("scroll", schedule);
+      for (const card of cards) card.classList.remove("motion-ready");
+    };
+  }, [visibleBooks, firstRow, endRow]);
   useLayoutEffect(() => {
+    if (!virtualLibrary) return;
+    const page = pageRef.current;
+    const grid = gridRef.current;
+    let frame = 0;
+    const measure = () => {
+      const styles = getComputedStyle(grid);
+      const columns = styles.gridTemplateColumns.split(" ").length;
+      const gap = parseFloat(styles.rowGap) || 0;
+      const card = grid.querySelector(".book-card");
+      const rowHeight = card ? card.getBoundingClientRect().height + gap : 400;
+      const top = Math.floor(Math.max(0, page.getBoundingClientRect().top - grid.getBoundingClientRect().top) / rowHeight / 8) * rowHeight * 8;
+      setGridViewport(previous => previous.columns === columns && previous.rowHeight === rowHeight && previous.top === top && previous.height === page.clientHeight ? previous : { columns, rowHeight, top, height: page.clientHeight });
+    };
+    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(measure); };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(page);
+    page.addEventListener("scroll", schedule, { passive: true });
+    measure();
+    return () => { observer.disconnect(); page.removeEventListener("scroll", schedule); cancelAnimationFrame(frame); };
+  }, [virtualLibrary, visibleBooks]);
+  useLayoutEffect(() => {
+    // Card measurements are needed only for actual manual reorder animations.
+    if (sortMode !== "manual") {
+      previousRectsRef.current.clear();
+      return;
+    }
     const nextRects = new Map();
     for (const card of gridRef.current?.querySelectorAll("[data-book-id]") || []) {
       const rect = card.getBoundingClientRect();
@@ -364,7 +435,7 @@ function Library({
       }
     }
     previousRectsRef.current = nextRects;
-  }, [visibleBooks, draggedId]);
+  }, [visibleBooks, draggedId, sortMode]);
   const cancelDrag = useCallback(() => {
     const gesture = gestureRef.current;
     if (!gesture) return;
@@ -498,10 +569,10 @@ function Library({
         <label className="search-field"><MagnifyingGlass /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索书籍或文章" /></label>
       </div>
       <div className="import-grid">
+        <button className="import-card" aria-disabled={!capabilities.fileImport || importing} onClick={capabilities.fileImport && !importing ? selectFiles : undefined}><span className="import-icon mint"><FileArrowUp weight="fill" /></span><span><strong>导入文件</strong><small>TXT、MD、Word、PDF、EPUB</small></span><CaretRight /></button>
         <button className="import-card primary" aria-disabled={!capabilities.pasteImport || importing} onClick={capabilities.pasteImport && !importing ? openPaste : undefined}><span className="import-icon"><Article weight="fill" /></span><span><strong>粘贴文本</strong><small>快速开始一段朗读</small></span><CaretRight /></button>
-        <button className="import-card" aria-disabled="true" onClick={() => showUnavailable("网页正文提取将在后续版本支持，当前不会发起网页抓取或创建空内容。") }><span className="import-icon blue"><LinkSimple weight="bold" /></span><span><strong>网页链接</strong><small>后续支持 · 当前不抓取网页</small></span><CaretRight /></button>
+        <button className="import-card" aria-disabled={!capabilities.webImport || importing} onClick={capabilities.webImport && !importing ? openWeb : () => showUnavailable("请在桌面应用中使用网页阅读。")}><span className="import-icon blue"><LinkSimple weight="bold" /></span><span><strong>网页链接</strong><small>提取正文 · 保存后离线阅读</small></span><CaretRight /></button>
         <button className="import-card" aria-disabled="true" onClick={() => showUnavailable("音频导入与语音转写暂未支持，现有朗读功能不会被当作音频转写使用。") }><span className="import-icon violet"><Headphones weight="fill" /></span><span><strong>播客 / 音频</strong><small>暂未支持 · 不会创建音频内容</small></span><CaretRight /></button>
-        <button className="import-card" aria-disabled={!capabilities.fileImport || importing} onClick={capabilities.fileImport && !importing ? selectFiles : undefined}><span className="import-icon mint"><FileArrowUp weight="fill" /></span><span><strong>导入文件</strong><small>TXT、EPUB、DOCX、PDF</small></span><CaretRight /></button>
       </div>
       {error ? <div className="library-error" role="alert">{error}</div> : null}
       {actionError ? <div className="library-error" role="alert">{actionError}</div> : null}
@@ -515,8 +586,8 @@ function Library({
       ) : null}
       <div className="section-title"><div><h2>{sortMode === "manual" ? "自定义排序" : "最近阅读"}</h2><span>{visibleBooks.length} 项内容</span></div><div className="library-sort-control" role="group" aria-label="内容库排序方式"><button className={sortMode !== "manual" ? "selected" : ""} disabled={sortPending} onClick={() => changeSortMode("recent")}>最近阅读</button><button className={sortMode === "manual" ? "selected" : ""} disabled={sortPending} onClick={() => changeSortMode("manual")}>自定义排序</button></div></div>
       {sortMode === "manual" ? <p className="library-sort-hint" role="status">{normalizedQuery ? "搜索期间暂停拖动，清空搜索即可调整顺序。" : sortPending ? "正在保存排序…" : "拖动卡片调整顺序，阅读不会改变排列。"}</p> : null}
-      <div ref={gridRef} className={`book-grid ${canDrag ? "sortable" : ""}`}>
-        {visibleBooks.map((book) => (
+      <div ref={gridRef} className={`book-grid ${canDrag ? "sortable" : ""} ${virtualLibrary ? "virtual-library" : ""}`} style={virtualLibrary && visibleBooks.length ? { paddingTop: firstRow * gridViewport.rowHeight, paddingBottom: Math.max(0, totalRows - Math.max(firstRow + 1, endRow)) * gridViewport.rowHeight } : undefined}>
+        {renderedBooks.map((book) => (
           <div key={book.id} data-book-id={book.id} className={`book-card ${book.id === draggedId ? "dragging" : ""} ${book.id === openAfterImportBookId ? "just-imported" : ""}`} onContextMenu={(event) => showBookMenu(event, book)} onPointerDown={(event) => startDrag(event, book)} onPointerMove={moveDrag} onPointerUp={finishDrag} onPointerCancel={cancelDrag}>
             <button className="book-open" aria-label={`阅读 ${book.title}`} aria-disabled={!readerEnabled} onClick={() => { if (!suppressOpenRef.current) openBook(book); }}>
               <div className="cover-wrap"><img src={book.coverUrl} alt="" draggable={false} /><span className="format-badge">{book.format || "TXT"}</span><span className="resume-pill"><Play weight="fill" /> 继续</span></div>
@@ -539,7 +610,7 @@ function Library({
       {bookToRemove ? <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !removing && setBookToRemove(null)}><div className="paste-modal remove-book-modal" role="alertdialog" aria-modal="true" aria-labelledby="remove-book-title" aria-describedby="remove-book-detail"><div className="modal-header"><div><span className="modal-icon remove"><Trash /></span><div><h2 id="remove-book-title">移出内容库？</h2><p id="remove-book-detail">“{bookToRemove.title}”将从内容库移除，阅读进度也会移除。原文件和应用缓存会保留。</p></div></div></div>{removeError ? <p className="modal-error" role="alert">{removeError}</p> : null}<div className="remove-book-actions"><button className="secondary-button" disabled={removing} onClick={() => setBookToRemove(null)}>取消</button><button className="remove-book-confirm" disabled={removing} onClick={confirmRemove}>{removing ? "正在移除…" : "确认移除"}</button></div></div></div> : null}
     </section>
   );
-}
+});
 
 const WINDOW_EDGES = ["top", "right", "bottom", "left", "topRight", "bottomRight", "bottomLeft", "topLeft"];
 
@@ -1008,15 +1079,49 @@ function PasteModal({ onClose, onImport, demoMode }) {
   );
 }
 
-function sliceCodePoints(text, start, end) {
-  return Array.from(text).slice(start, end).join("");
+function WebImportModal({ onClose, onImport }) {
+  const [url, setUrl] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event) => {
+    event.preventDefault();
+    if (submitting) return;
+    try {
+      const parsed = new URL(url.trim());
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error();
+    } catch {
+      setError("请输入完整的 http:// 或 https:// 网页地址。");
+      return;
+    }
+    setSubmitting(true);
+    setError("");
+    const message = await onImport({ url: url.trim() });
+    if (message) {
+      setError(message);
+      setSubmitting(false);
+    } else {
+      onClose();
+    }
+  };
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !submitting && onClose()}>
+      <form className="paste-modal" role="dialog" aria-modal="true" aria-labelledby="web-import-title" onSubmit={submit}>
+        <div className="modal-header"><div><span className="modal-icon"><LinkSimple weight="bold" /></span><div><h2 id="web-import-title">阅读网页</h2><p>提取网页正文并加入内容库</p></div></div><IconButton label="关闭" onClick={submitting ? undefined : onClose}><X /></IconButton></div>
+        <label className="field-label">网页地址<input type="url" autoFocus required value={url} onChange={(event) => setUrl(event.target.value)} disabled={submitting} placeholder="https://example.com/article" /></label>
+        <p className="web-import-hint">支持可直接访问的文章网页。需要登录或依赖脚本的页面，可复制正文后使用“粘贴文本”。</p>
+        <div className="modal-footer"><span>保存后可离线阅读和朗读</span>{error ? <span className="modal-error" role="alert">{error}</span> : null}<div><button type="button" className="secondary-button" onClick={onClose} disabled={submitting}>取消</button><button type="submit" className="primary-button" disabled={submitting}>{submitting ? "正在提交…" : "提取并阅读"}</button></div></div>
+      </form>
+    </div>
+  );
 }
 
 const ReaderTextBlockView = memo(function ReaderTextBlockView({ block, highlightStart, highlightEnd, readerStart, paragraphMode, firstLineIndent }) {
   const hasHighlight = highlightStart !== null && highlightEnd !== null && highlightStart < highlightEnd;
   const className = `reader-text-block mode-${paragraphMode} ${block.startsParagraph ? "paragraph-start" : "paragraph-continuation"}`;
   const style = { textIndent: block.startsParagraph && firstLineIndent ? "2em" : 0 };
-  const codePointLength = Array.from(block.text).length;
+  const codePoints = useMemo(() => Array.from(block.text), [block.text]);
+  const codePointLength = codePoints.length;
+  const slice = (from, to) => from === 0 && to === codePointLength ? block.text : codePoints.slice(from, to).join("");
   const start = hasHighlight ? Math.max(0, Math.min(codePointLength, highlightStart - block.startOffset)) : null;
   const end = hasHighlight ? Math.max(start, Math.min(codePointLength, highlightEnd - block.startOffset)) : null;
   const localReaderStart = readerStart !== null && readerStart >= block.startOffset && readerStart <= block.endOffset
@@ -1028,8 +1133,8 @@ const ReaderTextBlockView = memo(function ReaderTextBlockView({ block, highlight
       && localReaderStart >= from
       && (localReaderStart < to || (localReaderStart === codePointLength && to === codePointLength));
     const content = markerInside
-      ? <>{sliceCodePoints(block.text, from, localReaderStart)}<span className="reader-start-marker" aria-hidden="true" />{sliceCodePoints(block.text, localReaderStart, to)}</>
-      : sliceCodePoints(block.text, from, to);
+      ? <>{slice(from, localReaderStart)}<span className="reader-start-marker" aria-hidden="true" />{slice(localReaderStart, to)}</>
+      : slice(from, to);
     return highlighted ? <mark>{content}</mark> : content;
   };
   return (
@@ -1050,8 +1155,57 @@ const ReaderCopyView = memo(function ReaderCopyView({ blocks, sentenceStart, sen
     const overlaps = sentenceStart !== null && sentenceEnd > block.startOffset && sentenceStart < block.endOffset;
     const highlightStart = overlaps ? Math.max(sentenceStart, block.startOffset) : null;
     const highlightEnd = overlaps ? Math.min(sentenceEnd, block.endOffset) : null;
-    return <div id={`native-reader-block-${index}`} key={block.id}><ReaderTextBlockView block={block} highlightStart={highlightStart} highlightEnd={highlightEnd} readerStart={readerStart} paragraphMode={paragraphMode} firstLineIndent={firstLineIndent} /></div>;
+    const localStart = readerStart !== null && readerStart >= block.startOffset && readerStart <= block.endOffset ? readerStart : null;
+    return <div id={`native-reader-block-${index}`} key={block.id}><ReaderTextBlockView block={block} highlightStart={highlightStart} highlightEnd={highlightEnd} readerStart={localStart} paragraphMode={paragraphMode} firstLineIndent={firstLineIndent} /></div>;
   })}</div>;
+});
+
+const ChapterDirectory = memo(function ChapterDirectory({ chapters, selectedIndex, onNavigate }) {
+  const listRef = useRef(null);
+  const frameRef = useRef(0);
+  const focusRef = useRef(null);
+  const [viewport, setViewport] = useState({ top: 0, height: 600 });
+  const rowHeight = 43;
+  const overscan = 6;
+  const first = Math.max(0, Math.floor(viewport.top / rowHeight) - overscan);
+  const last = Math.min(chapters.length, Math.ceil((viewport.top + viewport.height) / rowHeight) + overscan);
+  const measure = useCallback(() => {
+    const list = listRef.current;
+    if (list) setViewport({ top: list.scrollTop, height: list.clientHeight });
+  }, []);
+  useLayoutEffect(() => {
+    const observer = new ResizeObserver(measure);
+    observer.observe(listRef.current);
+    measure();
+    return () => { observer.disconnect(); cancelAnimationFrame(frameRef.current); };
+  }, [measure]);
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    const top = selectedIndex * rowHeight;
+    if (top < list.scrollTop || top + rowHeight > list.scrollTop + list.clientHeight) {
+      list.scrollTop = Math.max(0, top - list.clientHeight / 2);
+      measure();
+    }
+  }, [selectedIndex, chapters, measure]);
+  useLayoutEffect(() => {
+    if (focusRef.current !== null) {
+      listRef.current.querySelector(`[data-chapter-index="${focusRef.current}"]`)?.focus({ preventScroll: true });
+      focusRef.current = null;
+    }
+  }, [viewport]);
+  const handleKey = (event) => {
+    const index = Number(event.target.dataset.chapterIndex);
+    const target = event.key === "ArrowDown" ? index + 1 : event.key === "ArrowUp" ? index - 1 : event.key === "Home" ? 0 : event.key === "End" ? chapters.length - 1 : null;
+    if (target === null || !Number.isFinite(index)) return;
+    event.preventDefault();
+    focusRef.current = Math.max(0, Math.min(chapters.length - 1, target));
+    listRef.current.scrollTop = Math.max(0, focusRef.current * rowHeight - listRef.current.clientHeight / 2);
+    measure();
+  };
+  return <div ref={listRef} className="toc-list virtual-toc" role="listbox" aria-label="章节目录" onKeyDown={handleKey} onScroll={() => {
+    cancelAnimationFrame(frameRef.current);
+    frameRef.current = requestAnimationFrame(measure);
+  }}><div className="toc-spacer" style={{ height: chapters.length * rowHeight }}><div className="toc-visible" style={{ transform: `translateY(${first * rowHeight}px)` }}>{chapters.slice(first, last).map((chapter) => <button key={chapter.index} data-chapter-index={chapter.index} role="option" aria-selected={selectedIndex === chapter.index} aria-posinset={chapter.index + 1} aria-setsize={chapters.length} title={chapter.title} className={selectedIndex === chapter.index ? "selected" : ""} onClick={() => onNavigate({ kind: "position", chapterIndex: chapter.index, charOffset: 0 })}><span>{String(chapter.index + 1).padStart(2, "0")}</span><span className="chapter-title">{chapter.title}</span></button>)}</div></div></div>;
 });
 
 function NativeReaderToolbar({ data, panelMode, setPanelMode, onBack, onSettings, floatingAvailable, floatingVisible, onFloatingToggle, onOpenSettings }) {
@@ -1090,6 +1244,12 @@ function NativeReader({ state, networkNotice, selectedStart, onChooseStart, onBa
   const scrollTimerRef = useRef(null);
   const readingSheetRef = useRef(null);
   const locateRequestedRef = useRef("");
+  const navigate = useCallback((target) => {
+    window.clearTimeout(scrollTimerRef.current);
+    scrollTimerRef.current = null;
+    locateRequestedRef.current = "";
+    onNavigate(target);
+  }, [onNavigate]);
   const data = state.data;
   const playback = data?.playback;
   const windowData = data?.window;
@@ -1134,12 +1294,6 @@ function NativeReader({ state, networkNotice, selectedStart, onChooseStart, onBa
     event.preventDefault();
     if (query.trim()) onSearch(query.trim());
   };
-  const navigate = (target) => {
-    window.clearTimeout(scrollTimerRef.current);
-    scrollTimerRef.current = null;
-    locateRequestedRef.current = "";
-    onNavigate(target);
-  };
   const locateCurrentSentence = () => {
     const current = playback.sentence;
     if (!current) return;
@@ -1177,7 +1331,7 @@ function NativeReader({ state, networkNotice, selectedStart, onChooseStart, onBa
       <div className="reader-layout">
         <aside className="toc-panel">
           <div className="toc-title"><span>{panelMode === "toc" ? "目录" : panelMode === "search" ? "书内搜索" : "书签"}</span><small>{panelMode === "toc" ? `${data.book.chapters.length} 章` : ""}</small></div>
-          {panelMode === "toc" ? <div className="toc-list">{data.book.chapters.map((chapter) => <button key={chapter.index} className={data.position.chapterIndex === chapter.index ? "selected" : ""} onClick={() => navigate({ kind: "position", chapterIndex: chapter.index, charOffset: 0 })}><span>{String(chapter.index + 1).padStart(2, "0")}</span>{chapter.title}</button>)}</div> : null}
+          {panelMode === "toc" ? <ChapterDirectory chapters={data.book.chapters} selectedIndex={data.position.chapterIndex} onNavigate={navigate} /> : null}
           {panelMode === "search" ? <div className="reader-side-content"><form onSubmit={submitSearch}><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入关键词后回车" /><button className="primary-button" type="submit">搜索</button></form>{state.search.status === "loading" ? <p>正在搜索真实正文…</p> : null}{state.search.error ? <p className="reader-side-error">{state.search.error}</p> : null}{state.search.page?.results.map((result) => <button key={result.id} className="reader-side-result" onClick={() => navigate({ kind: "position", chapterIndex: result.chapterIndex, charOffset: result.startOffset })}><strong>{result.chapterTitle}</strong><span>{result.excerpt}</span></button>)}{state.search.status === "ready" && state.search.page?.total === 0 ? <p>没有匹配内容</p> : null}</div> : null}
           {panelMode === "bookmarks" ? <div className="reader-side-content">{playback.sentence ? <button className="primary-button bookmark-current" onClick={() => onAddBookmark(playback.sentence)}>收藏当前句</button> : <p>开始朗读后可收藏当前句。</p>}{state.bookmarks.status === "loading" ? <p>正在读取书签…</p> : null}{state.bookmarks.error ? <p className="reader-side-error">{state.bookmarks.error}</p> : null}{state.bookmarks.page?.items.map((bookmark) => <div key={bookmark.id} className="reader-bookmark"><button onClick={() => navigate({ kind: "position", chapterIndex: bookmark.chapterIndex, charOffset: bookmark.startOffset })}><strong>{bookmark.chapterTitle}</strong><span>{bookmark.text}</span></button><button aria-label={`删除书签 ${bookmark.text}`} onClick={() => onRemoveBookmark(bookmark.id)}><X /></button></div>)}{state.bookmarks.status === "ready" && state.bookmarks.page?.total === 0 ? <p>暂无书签</p> : null}</div> : null}
           <div className="toc-footer"><UploadSimple /> 已同步阅读进度</div>
@@ -1309,7 +1463,7 @@ function SettingsModal({ preferences, speech, floatingSettings, version, softwar
               </div>
               <p className="update-security-note">仅下载版本匹配的 Windows 安装包；SHA256 校验通过后才允许安装。</p>
             </section>
-            <section className="settings-section about-section"><h3>关于</h3><p>启远阅读（QYReader） {version || "2.1.1"} · Qt WebEngine 桌面版</p></section>
+            <section className="settings-section about-section"><h3>关于</h3><p>启远阅读（QYReader） {version || "2.1.5"} · Qt WebEngine 桌面版</p></section>
           </> : null}
         </div>
       </div>
@@ -1358,13 +1512,14 @@ function MainApplication() {
   const [importSelection, setImportSelection] = useState(null);
   const [openAfterImportBookId, setOpenAfterImportBookId] = useState("");
   const [pasteOpen, setPasteOpen] = useState(false);
+  const [webOpen, setWebOpen] = useState(false);
   const [floating, setFloating] = useState(demoQaFloating);
   const [playing, setPlaying] = useState(demoQaFloating || qaNetwork);
   const [fontSize, setFontSize] = useState(21);
   const [nativeFloatingState, setNativeFloatingState] = useState(null);
   const [appPreferences, setAppPreferences] = useState(DEFAULT_APP_PREFERENCES);
   const [speechState, setSpeechState] = useState(DEFAULT_SPEECH_STATE);
-  const [appVersion, setAppVersion] = useState("2.1.1");
+  const [appVersion, setAppVersion] = useState("2.1.5");
   const [softwareUpdate, setSoftwareUpdate] = useState(DEFAULT_SOFTWARE_UPDATE);
   const [updatePromptVersion, setUpdatePromptVersion] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1469,7 +1624,7 @@ function MainApplication() {
           : partial
             ? `已导入 ${event.succeeded} 项，${event.failed} 项失败。${firstFailure ? ` ${firstFailure}` : ""}`
             : succeeded
-              ? `已成功导入 ${event.succeeded} 项；真实阅读器将在阶段 3 接入。`
+              ? `已成功导入 ${event.succeeded} 项。`
               : firstFailure || "导入失败，内容库未新增可用内容。";
         setImportState({
           status: event.state === "cancelled" ? "cancelled" : partial ? "partial" : succeeded ? "succeeded" : "failed",
@@ -1601,7 +1756,7 @@ function MainApplication() {
       setLibrarySortMode(error.initialData?.library?.sortMode || "recent");
       setCapabilities(error.initialData?.capabilities || EMPTY_CAPABILITIES);
       setAppPreferences(error.initialData?.preferences || DEFAULT_APP_PREFERENCES);
-      setAppVersion(error.initialData?.app?.version || "2.1.1");
+      setAppVersion(error.initialData?.app?.version || "2.1.5");
       setSoftwareUpdate(error.initialData?.softwareUpdate || DEFAULT_SOFTWARE_UPDATE);
       setBridgeError(error.message || "无法连接桌面程序。");
       setLibraryLoading(false);
@@ -1704,6 +1859,20 @@ function MainApplication() {
       return message;
     }
   };
+  const startWebImport = async (input) => {
+    const connection = connectionRef.current;
+    if (!connection) return "桌面通信尚未就绪。";
+    setImportState({ ...EMPTY_IMPORT_STATE, status: "processing", total: 1, message: "正在提取网页正文…" });
+    try {
+      const response = await connection.imports.startWebImport(input);
+      setImportState((previous) => ({ ...previous, jobId: response.data.jobId }));
+      return "";
+    } catch (error) {
+      const message = error.message || "无法读取网页正文。";
+      setImportState({ ...EMPTY_IMPORT_STATE, status: "failed", message, tone: "error" });
+      return message;
+    }
+  };
   const cancelImport = async () => {
     const connection = connectionRef.current;
     if (!connection || !importState.jobId) return;
@@ -1787,15 +1956,15 @@ function MainApplication() {
       if (requestId === readerWindowRequestRef.current) dispatchReader({ type: "FAILED", error: error.message || "正文窗口加载失败。" });
     }
   };
-  const clearReaderStart = () => {
+  const clearReaderStart = useCallback(() => {
     readerStartTargetRef.current = null;
     setSelectedReaderStart(null);
-  };
-  const chooseReaderStart = (target) => {
+  }, []);
+  const chooseReaderStart = useCallback((target) => {
     readerStartTargetRef.current = target;
     setSelectedReaderStart(target);
-  };
-  const navigateReader = async (target, { keepReaderStart = false } = {}) => {
+  }, []);
+  const navigateReader = useCallback(async (target, { keepReaderStart = false } = {}) => {
     const connection = connectionRef.current;
     const sessionId = readerSessionRef.current;
     if (!connection || !sessionId) return false;
@@ -1816,7 +1985,7 @@ function MainApplication() {
       }
       return false;
     }
-  };
+  }, [clearReaderStart]);
   const updateReaderPosition = async (chapterIndex, charOffset) => {
     const connection = connectionRef.current;
     const sessionId = readerSessionRef.current;
@@ -2098,9 +2267,10 @@ function MainApplication() {
   const showUnavailable = (message) => setImportState({ ...EMPTY_IMPORT_STATE, status: "unavailable", message, tone: "info" });
   const desktopMode = bridgeMode === "native" || nativeTransportAvailable;
   const readerEnabled = bridgeMode === "demo" || capabilities.reader;
-  const effectiveCapabilities = bridgeMode === "demo"
+  const effectiveCapabilities = useMemo(() => bridgeMode === "demo"
     ? { fileImport: true, pasteImport: true, webImport: true, audioImport: true }
-    : capabilities;
+    : capabilities, [bridgeMode, capabilities]);
+  const libraryActions = useStableActions({ setSortMode: setLibrarySort, moveBook: moveLibraryItem, revealSource, openBook, removeBook, openPaste: () => setPasteOpen(true), openWeb: () => setWebOpen(true), selectFiles, showUnavailable, cancelImport });
   useEffect(() => {
     const onKeyDown = (event) => {
       const target = event.target;
@@ -2143,12 +2313,13 @@ function MainApplication() {
               ? <DemoReader setPage={setPage} fontSize={fontSize} setFontSize={setFontSize} playing={playing} setPlaying={setPlaying} floating={floating} setFloating={setFloating} networkNotice={networkNotice} />
               : page === "reader" && bridgeMode === "native"
                 ? <NativeReader state={readerState} networkNotice={networkNotice} selectedStart={selectedReaderStart} onChooseStart={chooseReaderStart} onBack={() => setPage("library")} onNavigate={navigateReader} onGetWindow={getReaderWindow} onUpdatePosition={updateReaderPosition} onSearch={searchReader} onLoadBookmarks={loadReaderBookmarks} onAddBookmark={addReaderBookmark} onRemoveBookmark={removeReaderBookmark} onCommand={controlReaderPlayback} onSettings={updateReaderSettings} floatingAvailable={capabilities.floatingReader} floatingVisible={Boolean(nativeFloatingState?.visible)} onFloatingToggle={switchToFloatingReader} onOpenSettings={() => setSettingsOpen(true)} />
-                : <Library books={books} sortMode={librarySortMode} setSortMode={setLibrarySort} moveBook={moveLibraryItem} revealSource={revealSource} error={bridgeError} loading={libraryLoading} openBook={openBook} removeBook={removeBook} openPaste={() => setPasteOpen(true)} selectFiles={selectFiles} showUnavailable={showUnavailable} capabilities={effectiveCapabilities} readerEnabled={readerEnabled} importState={importState} cancelImport={cancelImport} openAfterImportBookId={openAfterImportBookId} />}
+                : <Library {...libraryActions} books={books} sortMode={librarySortMode} error={bridgeError} loading={libraryLoading} capabilities={effectiveCapabilities} readerEnabled={readerEnabled} importState={importState} openAfterImportBookId={openAfterImportBookId} />}
           </main>
         </div>
       </div>
       {floating && bridgeMode === "demo" ? <DemoFloatingReader playing={playing} setPlaying={setPlaying} onClose={() => setFloating(false)} onReturnToMain={() => setFloating(false)} /> : null}
       {pasteOpen && <PasteModal onClose={() => setPasteOpen(false)} onImport={startPasteImport} demoMode={bridgeMode === "demo"} />}
+      {webOpen && <WebImportModal onClose={() => setWebOpen(false)} onImport={startWebImport} />}
       {importSelection && <ImportConfirmationModal selection={importSelection} onClose={() => { setImportSelection(null); setImportState({ ...EMPTY_IMPORT_STATE }); }} onStart={startFileImport} />}
       {settingsOpen && <SettingsModal preferences={appPreferences} speech={speechState} floatingSettings={nativeFloatingState?.settings || EMPTY_FLOATING_STATE.settings} version={appVersion} softwareUpdate={softwareUpdate} pending={settingsPending} onUpdateApp={updateAppPreferences} onUpdateSpeech={updateSpeechPreferences} onUpdateFloating={updateFloatingPreferences} onCheckUpdate={checkForUpdates} onDownloadUpdate={downloadUpdate} onSkipUpdate={skipUpdate} onInstallUpdate={installUpdate} onOpenUpdatePage={openUpdatePage} onClose={() => setSettingsOpen(false)} />}
       {updatePromptVersion && softwareUpdate.latestVersion === updatePromptVersion ? <UpdateAvailableModal update={softwareUpdate} onDownload={downloadUpdate} onSkip={skipUpdate} onOpenRelease={() => openUpdatePage("release")} onClose={dismissUpdatePrompt} /> : null}

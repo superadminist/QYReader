@@ -414,6 +414,9 @@ class PlaybackService:
                 "message": str(raw.get("message") or "朗读出错"),
                 "retryable": bool(raw.get("retryable", True)),
             }
+            details = raw.get("details")
+            if isinstance(details, dict):
+                error["details"] = dict(details)
             fallback_backend = raw.get("fallback_backend")
             if fallback_backend:
                 self._fallback_active = True

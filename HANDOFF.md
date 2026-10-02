@@ -100,6 +100,7 @@ Qt DesktopWindow
 | `cache\` | 解析后的正文缓存 |
 | `cache\sources\` | 导入源文件备份 |
 | `tts_cache\` | 语音缓存 |
+| `logs\edge-tts.log` | Edge 异常类别、状态码、Retry-After 与退避记录；不记录正文、令牌或完整 URL |
 
 服务层沿用原有字段，缺失的新设置读取默认值；只有用户实际修改设置或导入内容时才写入。写入采用锁和原子替换，损坏或结构错误的数据会 fail closed，不用空数据覆盖原文件。
 

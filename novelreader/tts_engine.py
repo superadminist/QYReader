@@ -18,7 +18,11 @@ import json
 
 import asyncio
 from collections import OrderedDict
+from contextlib import contextmanager
+import logging
+from logging.handlers import RotatingFileHandler
 import queue
+import random
 import re
 import tempfile
 import threading
@@ -56,11 +60,211 @@ _EDGE_SYNTH_TIMEOUT_SECONDS = 30.0
 _EDGE_SYNTH_ATTEMPT_TIMEOUT_SECONDS = 20.0
 _EDGE_SYNTH_ATTEMPTS = 2
 _EDGE_RETRY_DELAY_SECONDS = 0.35
+_EDGE_REQUEST_MIN_INTERVAL_SECONDS = 1.0
+_EDGE_BACKOFF_MAX_SECONDS = 120.0
 _EDGE_BUFFERING_NOTICE_SECONDS = 1.5
 _EDGE_RECOVERY_INITIAL_SECONDS = 30.0
 _EDGE_RECOVERY_MAX_SECONDS = 300.0
 _EDGE_AUDIO_CACHE_ITEMS = 24
 _EDGE_AUDIO_CACHE_BYTES = 16 * 1024 * 1024
+_EDGE_DIAGNOSTIC_LOG_BYTES = 2 * 1024 * 1024
+
+LOGGER = logging.getLogger(__name__)
+
+
+def configure_edge_diagnostics(data_root):
+    """Persist bounded Edge diagnostics without正文、令牌或完整请求 URL。"""
+    log_dir = os.path.join(os.fspath(data_root), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "edge-tts.log")
+    normalized = os.path.normcase(os.path.abspath(log_path))
+    for handler in LOGGER.handlers:
+        if getattr(handler, "_qyreader_edge_log", None) == normalized:
+            return log_path
+    handler = RotatingFileHandler(
+        log_path,
+        maxBytes=_EDGE_DIAGNOSTIC_LOG_BYTES,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    handler._qyreader_edge_log = normalized
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    LOGGER.addHandler(handler)
+    LOGGER.setLevel(logging.INFO)
+    LOGGER.propagate = False
+    return log_path
+
+
+class EdgeSynthesisError(RuntimeError):
+    """A sanitized Edge failure safe to expose to the UI and diagnostic log."""
+
+    def __init__(self, details):
+        self.details = dict(details or {})
+        super().__init__(self.details.get("category") or "edge_synthesis_failed")
+
+
+def _edge_exception_details(exc, *, attempt=None, purpose="playback"):
+    if isinstance(exc, EdgeSynthesisError):
+        details = dict(exc.details)
+        if attempt is not None:
+            details["attempt"] = int(attempt)
+        details.setdefault("purpose", purpose)
+        return details
+
+    chain = []
+    current = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = getattr(current, "__cause__", None) or getattr(
+            current, "__context__", None
+        )
+
+    status_code = None
+    headers = None
+    status_exception = None
+    for item in chain:
+        status = getattr(item, "status", None)
+        if status is None:
+            status = getattr(item, "status_code", None)
+        try:
+            status = int(status) if status is not None else None
+        except (TypeError, ValueError):
+            status = None
+        if status is not None:
+            status_code = status
+            headers = getattr(item, "headers", None)
+            status_exception = item
+            break
+
+    retry_after = None
+    if headers is not None:
+        try:
+            value = headers.get("Retry-After")
+            retry_after = max(0.0, float(value)) if value is not None else None
+        except (AttributeError, TypeError, ValueError):
+            retry_after = None
+
+    exception = status_exception or (chain[-1] if chain else exc)
+    exception_type = type(exception).__name__
+    names = " ".join(type(item).__name__.lower() for item in chain)
+    if status_code == 429:
+        category = "rate_limited"
+    elif status_code == 403:
+        category = "access_denied"
+    elif status_code in {500, 502, 503, 504}:
+        category = "service_unavailable"
+    elif status_code is not None:
+        category = "http_error"
+    elif "timeout" in names:
+        category = "timeout"
+    elif "noaudioreceived" in names:
+        category = "no_audio"
+    elif any(token in names for token in ("connection", "connector", "websocket")):
+        category = "connection"
+    else:
+        category = "unknown"
+
+    details = {
+        "category": category,
+        "exceptionType": exception_type,
+        "statusCode": status_code,
+        "retryAfterSeconds": retry_after,
+        "purpose": str(purpose or "playback"),
+    }
+    if attempt is not None:
+        details["attempt"] = int(attempt)
+    return details
+
+
+class _EdgeRequestGovernor:
+    """Serialize Edge WebSockets and apply process-wide adaptive cooldowns."""
+
+    _PRIORITIES = {"playback": 0, "recovery": 1, "prefetch": 2, "cache": 3}
+
+    def __init__(self, min_interval=_EDGE_REQUEST_MIN_INTERVAL_SECONDS):
+        self._cv = threading.Condition()
+        self._min_interval = max(0.0, float(min_interval))
+        self._busy = False
+        self._waiters = []
+        self._sequence = 0
+        self._next_allowed_at = 0.0
+        self._backoff_until = 0.0
+        self._failure_streak = 0
+
+    @contextmanager
+    def slot(self, timeout, purpose):
+        deadline = time.monotonic() + max(0.01, float(timeout))
+        priority = self._PRIORITIES.get(str(purpose), 2)
+        marker = object()
+        with self._cv:
+            self._sequence += 1
+            ticket = (priority, self._sequence, marker)
+            self._waiters.append(ticket)
+            while True:
+                now = time.monotonic()
+                allowed_at = max(self._next_allowed_at, self._backoff_until)
+                first = min(self._waiters, key=lambda item: (item[0], item[1]))
+                if not self._busy and first[2] is marker and now >= allowed_at:
+                    self._waiters.remove(ticket)
+                    self._busy = True
+                    break
+                remaining = deadline - now
+                if remaining <= 0:
+                    self._waiters.remove(ticket)
+                    self._cv.notify_all()
+                    raise TimeoutError("等待 Edge 合成请求调度超时")
+                wait_for = remaining
+                if not self._busy and first[2] is marker and allowed_at > now:
+                    wait_for = min(wait_for, allowed_at - now)
+                self._cv.wait(timeout=max(0.01, wait_for))
+        try:
+            yield max(0.01, deadline - time.monotonic())
+        finally:
+            with self._cv:
+                self._busy = False
+                self._next_allowed_at = max(
+                    self._next_allowed_at,
+                    time.monotonic() + self._min_interval,
+                )
+                self._cv.notify_all()
+
+    def report_success(self):
+        with self._cv:
+            self._failure_streak = 0
+
+    def report_failure(self, details):
+        category = str((details or {}).get("category") or "unknown")
+        if category not in {
+            "rate_limited",
+            "access_denied",
+            "service_unavailable",
+            "timeout",
+        }:
+            return 0.0
+        with self._cv:
+            self._failure_streak += 1
+            base = {
+                "rate_limited": 15.0,
+                "access_denied": 15.0,
+                "service_unavailable": 5.0,
+                "timeout": 2.0,
+            }[category]
+            retry_after = (details or {}).get("retryAfterSeconds")
+            try:
+                retry_after = max(0.0, float(retry_after))
+            except (TypeError, ValueError):
+                retry_after = 0.0
+            delay = max(base * (2 ** (self._failure_streak - 1)), retry_after)
+            delay = min(_EDGE_BACKOFF_MAX_SECONDS, delay)
+            delay += random.uniform(0.0, min(2.0, delay * 0.15))
+            self._backoff_until = max(self._backoff_until, time.monotonic() + delay)
+            self._cv.notify_all()
+            return delay
+
+
+_EDGE_REQUEST_GOVERNOR = _EdgeRequestGovernor()
 
 
 def _install_sapi_stream_events():
@@ -195,6 +399,54 @@ def synth_audio(text, voice, rate=200, timeout=None):
     return bytes(buf)
 
 
+def _synth_audio_governed(text, voice, rate=200, timeout=None, purpose="playback"):
+    """Run one sanitized, process-wide governed Edge request."""
+    request_timeout = (
+        _EDGE_SYNTH_TIMEOUT_SECONDS if timeout is None else max(0.01, float(timeout))
+    )
+    try:
+        with _EDGE_REQUEST_GOVERNOR.slot(request_timeout, purpose) as remaining:
+            try:
+                audio = synth_audio(
+                    text,
+                    voice,
+                    rate,
+                    timeout=min(request_timeout, remaining),
+                )
+                if not audio:
+                    raise EdgeSynthesisError({
+                        "category": "no_audio",
+                        "exceptionType": "EmptyAudio",
+                        "statusCode": None,
+                        "retryAfterSeconds": None,
+                        "purpose": purpose,
+                    })
+            except Exception as exc:
+                details = _edge_exception_details(exc, purpose=purpose)
+                details["cooldownSeconds"] = round(
+                    _EDGE_REQUEST_GOVERNOR.report_failure(details), 3
+                )
+                LOGGER.warning(
+                    "edge_synthesis_failure %s",
+                    json.dumps(details, ensure_ascii=True, sort_keys=True),
+                )
+                raise EdgeSynthesisError(details) from exc
+            _EDGE_REQUEST_GOVERNOR.report_success()
+            return audio
+    except EdgeSynthesisError:
+        raise
+    except Exception as exc:
+        details = _edge_exception_details(exc, purpose=purpose)
+        details["cooldownSeconds"] = round(
+            _EDGE_REQUEST_GOVERNOR.report_failure(details), 3
+        )
+        LOGGER.warning(
+            "edge_synthesis_failure %s",
+            json.dumps(details, ensure_ascii=True, sort_keys=True),
+        )
+        raise EdgeSynthesisError(details) from exc
+
+
 class _EdgePrefetch:
     """后台批量预取后续句子的音频，缓存最多 MAX_AHEAD 句，句间零卡顿。
 
@@ -203,8 +455,8 @@ class _EdgePrefetch:
     exact reading order even when a later network request finishes first.
     """
 
-    MAX_AHEAD = 8
-    WORKERS = 2
+    MAX_AHEAD = 3
+    WORKERS = 1
 
     def __init__(self, synth_fn, content, start_off, limit=MAX_AHEAD, autostart=True):
         self._synth = synth_fn
@@ -213,6 +465,7 @@ class _EdgePrefetch:
         self._lock = threading.Lock()
         self._ready = threading.Condition()
         self._results = {}
+        self._last_failures = {}
         self._slots = threading.Semaphore(limit)
         self._next_off = start_off
         self._stopped = threading.Event()
@@ -248,11 +501,17 @@ class _EdgePrefetch:
                     self._next_off = nxt
                 try:
                     audio = self._synth(text)
-                except Exception:
+                    failure = None
+                except Exception as exc:
                     audio = None
+                    failure = _edge_exception_details(exc, purpose="prefetch")
                 with self._ready:
-                    self._results[off] = (text, audio)
+                    self._results[off] = (text, audio, failure)
                     self._ready.notify_all()
+                if failure is not None:
+                    # Preserve the failed sentence for ordered consumption but
+                    # stop opening more WebSockets behind a rejected request.
+                    return
         except Exception:
             pass
 
@@ -263,10 +522,12 @@ class _EdgePrefetch:
             while not self._stopped.is_set():
                 if self._results:
                     off = min(self._results)
-                    result = self._results.pop(off)
+                    text, audio, failure = self._results.pop(off)
+                    if failure:
+                        self._last_failures[off] = failure
                     self._slots.release()
                     self._ready.notify_all()
-                    return result
+                    return text, audio
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     return None
@@ -288,7 +549,9 @@ class _EdgePrefetch:
                     self._results.pop(off, None)
                     self._slots.release()
                 if expected_off in self._results:
-                    text, audio = self._results.pop(expected_off)
+                    text, audio, failure = self._results.pop(expected_off)
+                    if failure:
+                        self._last_failures[expected_off] = failure
                     self._slots.release()
                     self._ready.notify_all()
                     return text == expected_text, audio if text == expected_text else None
@@ -302,6 +565,10 @@ class _EdgePrefetch:
         with self._ready:
             return len(self._results)
 
+    def failure_for(self, expected_off):
+        with self._ready:
+            return self._last_failures.pop(expected_off, None)
+
     def close(self):
         self._stopped.set()
         with self._ready:
@@ -313,13 +580,13 @@ class WholeBookCacher:
 
     设计要点（保证「缓存期间不影响正常朗读」）：
     - 完全独立于朗读工作线程：不使用 pygame / pyttsx3，不占用朗读音频资源；
-    - 并发限 3 线程，避免打满网络拖慢朗读自身的按需合成；
+    - 单线程低优先级缓存，所有 Edge 请求再由进程级调度器统一串行；
     - 文件先写临时名再 os.replace 原子发布，朗读线程永远读不到半截文件；
     - 朗读侧按 (章节, 句偏移, 语音, 语速, 书籍) 命中缓存则直接播放，整本缓存完成后朗读零网络延迟；
     - 支持暂停/继续、章节选择、续传（已缓存文件自动跳过）、容量统计、完成后自动关机。
     """
 
-    WORKERS = 3
+    WORKERS = 1
     SAVE_INTERVAL = 50  # 每完成 N 个任务保存一次进度
 
     def __init__(self, book, book_id, cache_root, voice, rate, chapter_indices=None,
@@ -589,12 +856,24 @@ class WholeBookCacher:
                 self._maybe_save()
                 continue
             try:
-                audio = synth_audio(text, self._voice, self._rate)
+                audio = _synth_audio_governed(
+                    text,
+                    self._voice,
+                    self._rate,
+                    purpose="cache",
+                )
                 if not audio:
                     continue  # 合成失败/空：不标记完成，留待续传重试
                 self._write(ci, off, audio)
+            except EdgeSynthesisError:
+                # Do not walk the rest of the book after the service has begun
+                # rejecting requests. With one worker it is safe to put this
+                # task back and pause until the user explicitly resumes.
+                with self._lock:
+                    self._next = min(self._next, idx)
+                break
             except Exception:
-                continue  # 网络/合成失败：不标记完成，留待续传重试（避免 progress 谎报完成）
+                continue  # 本地写入等失败：不标记完成，留待续传重试
             with self._lock:
                 self._completed.add(idx)
                 self._done += 1
@@ -728,6 +1007,7 @@ class SpeechController:
         self._edge_prime_token = 0
         self._edge_prime_key = None
         self._edge_prime_audio = None
+        self._edge_prime_failure = None
         self._edge_prime_event = None
         self._edge_prime_prefetch = None
         self._edge_audio_cache = OrderedDict()
@@ -907,6 +1187,7 @@ class SpeechController:
             token = self._edge_prime_token
             ready = threading.Event()
             self._edge_prime_key = key
+            self._edge_prime_failure = None
             self._edge_prime_event = ready
             self._edge_prime_prefetch = _EdgePrefetch(
                 self._edge_synthesize,
@@ -932,25 +1213,33 @@ class SpeechController:
             daemon=True,
         )
         # Give the sentence the user is waiting for the first connection slot,
-        # then fill the smaller lookahead window in the background.
+        # then fill the smaller lookahead window while its audio is playing.
         prime_thread.start()
-        prime_prefetch.start()
 
     def _prime_edge_sentence(self, token, key, text, ready):
         try:
             audio = self._edge_synthesize(text)
-        except Exception:
+            failure = None
+        except Exception as exc:
             audio = None
+            failure = _edge_exception_details(exc, purpose="playback")
         with self._cv:
             if token == self._edge_prime_token and key == self._edge_prime_key:
                 self._edge_prime_audio = audio
+                self._edge_prime_failure = failure
+                prefetch = self._edge_prime_prefetch
+            else:
+                prefetch = None
             ready.set()
+        if prefetch is not None and audio:
+            prefetch.start()
 
     def _invalidate_edge_prime_locked(self):
         prefetch = self._edge_prime_prefetch
         self._edge_prime_token += 1
         self._edge_prime_key = None
         self._edge_prime_audio = None
+        self._edge_prime_failure = None
         self._edge_prime_event = None
         self._edge_prime_prefetch = None
         if prefetch is not None:
@@ -996,22 +1285,24 @@ class SpeechController:
                 text,
             )
             if key != self._edge_prime_key or self._edge_prime_event is None:
-                return False, False, None, None
+                return False, False, None, None, None
             token = self._edge_prime_token
             ready = self._edge_prime_event
         ready.wait(timeout=max(0.0, float(timeout)))
         with self._cv:
             if token != self._edge_prime_token or key != self._edge_prime_key:
-                return False, False, None, None
+                return False, False, None, None, None
             if not ready.is_set():
-                return True, False, None, None
+                return True, False, None, None, None
             audio = self._edge_prime_audio
+            failure = self._edge_prime_failure
             prefetch = self._edge_prime_prefetch
             self._edge_prime_key = None
             self._edge_prime_audio = None
+            self._edge_prime_failure = None
             self._edge_prime_event = None
             self._edge_prime_prefetch = None
-            return True, True, audio, prefetch
+            return True, True, audio, prefetch, failure
 
     def _cacher_for(self, book_id=None):
         """按 book_id 取缓存器；未指定时用当前书 id。"""
@@ -2018,17 +2309,41 @@ class SpeechController:
             if remaining <= 0:
                 break
             try:
-                audio = synth_audio(
+                audio = _synth_audio_governed(
                     text,
                     voice,
                     rate,
                     timeout=min(_EDGE_SYNTH_ATTEMPT_TIMEOUT_SECONDS, remaining),
+                    purpose="playback",
                 )
                 if audio:
                     return audio
-                last_error = RuntimeError("Edge 语音返回了空音频")
+                last_error = EdgeSynthesisError(
+                    {
+                        "category": "no_audio",
+                        "exceptionType": "EmptyAudio",
+                        "statusCode": None,
+                        "retryAfterSeconds": None,
+                        "purpose": "playback",
+                        "attempt": attempt + 1,
+                    }
+                )
             except Exception as exc:
-                last_error = exc
+                details = _edge_exception_details(
+                    exc,
+                    attempt=attempt + 1,
+                    purpose="playback",
+                )
+                last_error = EdgeSynthesisError(details)
+                # A service admission/rate response is authoritative. An
+                # immediate second WebSocket only increases the cooldown risk;
+                # let SAPI and the low-frequency recovery probe take over.
+                if details.get("category") in {
+                    "rate_limited",
+                    "access_denied",
+                    "service_unavailable",
+                }:
+                    break
             if attempt + 1 < _EDGE_SYNTH_ATTEMPTS:
                 remaining = deadline - time.monotonic()
                 if remaining <= _EDGE_RETRY_DELAY_SECONDS:
@@ -2036,7 +2351,16 @@ class SpeechController:
                 time.sleep(_EDGE_RETRY_DELAY_SECONDS)
         if last_error is not None:
             raise last_error
-        raise TimeoutError("Edge 语音生成超时")
+        raise EdgeSynthesisError(
+            {
+                "category": "timeout",
+                "exceptionType": "TimeoutError",
+                "statusCode": None,
+                "retryAfterSeconds": None,
+                "purpose": "playback",
+                "attempt": _EDGE_SYNTH_ATTEMPTS,
+            }
+        )
 
     def _reset_edge_recovery_locked(self):
         """Invalidate a stale recovery probe while holding ``self._cv``."""
@@ -2138,6 +2462,7 @@ class SpeechController:
     ):
         """Edge 语音：整本缓存命中直接播放；否则批量预取/按需合成；失败回退系统语音。"""
         recovered_from_fallback = False
+        failure_details = None
         if self._edge_session_fallback:
             recovered_from_fallback = self._consume_edge_recovery_result(gen)
             if not recovered_from_fallback:
@@ -2160,12 +2485,12 @@ class SpeechController:
                 buffering_posted = True
                 self._post({"type": "buffering"}, gen)
 
-        primed, prime_ready, audio, prime_prefetch = self._edge_prime_result(
+        primed, prime_ready, audio, prime_prefetch, failure_details = self._edge_prime_result(
             ci, off, text
         )
         while primed and not prime_ready and not self._should_stop(gen):
             report_buffering_if_needed()
-            primed, prime_ready, audio, prime_prefetch = self._edge_prime_result(
+            primed, prime_ready, audio, prime_prefetch, failure_details = self._edge_prime_result(
                 ci, off, text
             )
         if self._should_stop(gen):
@@ -2195,15 +2520,20 @@ class SpeechController:
             audio = None
         elif self._edge_prefetch is None:
             # No idle prime exists (for example, play was requested immediately
-            # after binding).  Start lookahead before the current network call
-            # so following sentences synthesize during the first sentence.
-            self._edge_prefetch = _EdgePrefetch(
-                self._edge_synthesize, content, next_off, _EdgePrefetch.MAX_AHEAD
-            )
+            # after binding). Generate the current sentence first so lookahead
+            # can never take its connection slot, then prefetch while it plays.
             try:
                 audio = self._edge_synthesize(text)
-            except Exception:
+            except Exception as exc:
                 audio = None
+                failure_details = _edge_exception_details(exc, purpose="playback")
+            if audio:
+                self._edge_prefetch = _EdgePrefetch(
+                    self._edge_synthesize,
+                    content,
+                    next_off,
+                    _EdgePrefetch.MAX_AHEAD,
+                )
         else:
             audio = None
             while not self._should_stop(gen):
@@ -2213,6 +2543,12 @@ class SpeechController:
                     timeout=0.10,
                 )
                 if ready:
+                    if not audio:
+                        failure_reader = getattr(
+                            self._edge_prefetch, "failure_for", None
+                        )
+                        if callable(failure_reader):
+                            failure_details = failure_reader(clean_off)
                     break
                 report_buffering_if_needed()
                 with self._cv:
@@ -2237,6 +2573,13 @@ class SpeechController:
                     "message": "联网语音生成失败，暂时使用系统语音；网络恢复后将自动切回所选音色",
                     "retryable": True,
                     "fallback_backend": "sapi",
+                    "details": dict(failure_details or {
+                        "category": "unknown",
+                        "exceptionType": "UnknownEdgeFailure",
+                        "statusCode": None,
+                        "retryAfterSeconds": None,
+                        "purpose": "playback",
+                    }),
                 },
                 gen,
             )

@@ -45,7 +45,7 @@ function demoReaderWindow(sessionId, bookId, anchorOffset = 0) {
 }
 
 const EMPTY_DATA = {
-  app: { version: "2.1.1" },
+  app: { version: "2.1.5" },
   library: { books: [], total: 0, sortMode: "recent" },
   preferences: { theme: "护眼", colorScheme: "light", autoOpenLast: true, closeToTray: false, autoCheckUpdates: true, startupBookId: "" },
   window: { isMaximized: false, isFullScreen: false },
@@ -60,7 +60,7 @@ const EMPTY_DATA = {
   },
   softwareUpdate: {
     status: "idle",
-    currentVersion: "2.1.1",
+    currentVersion: "2.1.5",
     latestVersion: "",
     lastCheckedAt: "",
     message: "尚未检查更新。",
@@ -740,6 +740,15 @@ function nativeImports(nativeBridge) {
         validImportStart,
       );
     },
+    async startWebImport(input) {
+      if (!input || typeof input.url !== "string" || !input.url.trim()) {
+        throw new BridgeProtocolError("网页地址不能为空。", "BRIDGE_INVALID_ARGUMENT");
+      }
+      return parseBridgeResponse(
+        await invokeWithResult(nativeBridge, "startWebImport", [JSON.stringify(input)]),
+        validImportStart,
+      );
+    },
     async cancelImport(jobId) {
       if (typeof jobId !== "string" || !jobId) {
         throw new BridgeProtocolError("导入任务编号无效。", "BRIDGE_INVALID_ARGUMENT");
@@ -1326,6 +1335,9 @@ function createDemoConnection() {
         }
         const title = input.title?.trim() || text.split(/\r?\n/).find((line) => line.trim())?.trim().slice(0, 40) || "粘贴文本";
         return startJob([{ name: `${title}.txt`, format: "TXT", title }]);
+      },
+      async startWebImport() {
+        throw new BridgeProtocolError("浏览器预览无法抓取网页，请在桌面应用中使用网页阅读。", "WEB_DESKTOP_REQUIRED");
       },
       async cancelImport(jobId) {
         const job = jobs.get(jobId);

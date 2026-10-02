@@ -263,7 +263,7 @@ class Stage2AcceptanceTests(unittest.TestCase):
         capabilities = payload["data"]["capabilities"]
         self.assertTrue(capabilities["fileImport"])
         self.assertTrue(capabilities["pasteImport"])
-        self.assertFalse(capabilities["webImport"])
+        self.assertTrue(capabilities["webImport"])
         self.assertFalse(capabilities["audioImport"])
         self.assertTrue(capabilities["reader"])
         self.assertTrue(capabilities["tts"])

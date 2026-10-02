@@ -177,6 +177,56 @@ class ReaderServiceTests(unittest.TestCase):
         self.assertEqual(storage.get_setting("last_book"), book_id)
         self.assertGreater(storage.get_book(book_id)["last_read_at"], 0)
 
+    def test_background_progress_flushes_on_switch_and_preserves_library_changes(self):
+        first, _, _ = self.add_book(chapters=[Chapter("一", "正文。" * 100)])
+        service = ReaderService(self.library_path, deferred_progress=True)
+        self.addCleanup(service.shutdown)
+        opened = service.open_book(first)
+        for offset in range(1, 100):
+            service.update_position(opened["sessionId"], 0, offset)
+        second, _, _ = self.add_book(name="second.txt")
+        storage = Storage(os.fspath(self.library_path))
+        storage.set_setting("volume", 42)
+        service.open_book(second)
+        saved = Storage(os.fspath(self.library_path))
+        self.assertEqual(saved.get_book(first)["progress"]["char_offset"], 99)
+        self.assertIsNotNone(saved.get_book(second))
+        self.assertEqual(saved.get_setting("volume"), 42)
+
+    def test_background_navigation_and_close_save_exact_unicode_position(self):
+        book_id, _, _ = self.add_book()
+        service = ReaderService(self.library_path, deferred_progress=True)
+        self.addCleanup(service.shutdown)
+        opened = service.open_book(book_id)
+        service.navigate(opened["sessionId"], {"kind": "position", "chapterIndex": 0, "charOffset": 2})
+        service.close_session(opened["sessionId"])
+        restored = service.open_book(book_id)
+        self.assertEqual(restored["position"]["charOffset"], 2)
+
+    def test_removing_active_book_drains_pending_progress_and_closes_cleanly(self):
+        from PySide6.QtCore import QCoreApplication
+        from novelreader.library_service import LibraryQueryService
+        from novelreader.qt_bridge import DesktopBridge
+        from tests.test_stage3_qt_bridge import _Playback, _Window
+        app = QCoreApplication.instance() or QCoreApplication([])
+        book_id, _, _ = self.add_book()
+        service = ReaderService(self.library_path, deferred_progress=True)
+        opened = service.open_book(book_id)
+        service.update_position(opened["sessionId"], 0, 2)
+        playback = _Playback()
+        playback.session_id = opened["sessionId"]
+        playback.session_identity = lambda: {"sessionId": opened["sessionId"], "bookId": book_id}
+        bridge = DesktopBridge(_Window(), library=LibraryQueryService(self.library_path), reader=service, playback=playback)
+        self.addCleanup(bridge.shutdown)
+        errors = []
+        bridge.bridgeError.connect(errors.append)
+        removed = json.loads(bridge.removeLibraryBook(book_id))
+        self.assertTrue(removed["ok"], removed)
+        self.assertIsNone(Storage(os.fspath(self.library_path)).get_book(book_id))
+        bridge.shutdown()
+        self.assertEqual(errors, [])
+        self.assertFalse(service._progress_writer._thread.is_alive())
+
     def test_update_settings_maps_contract_fields_and_preserves_legacy_settings(self):
         book_id, _, _ = self.add_book()
         service = ReaderService(self.library_path)

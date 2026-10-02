@@ -223,7 +223,7 @@ def test_tts_logic():
         set(made[:5]) == {"第一句。", "第二句。", "第三句。", "第四句。", "第五句。"},
         str(made[:5]),
     )
-    check("默认预取上限为 8", _EdgePrefetch.MAX_AHEAD == 8, str(_EdgePrefetch.MAX_AHEAD))
+    check("默认预取上限为 3", _EdgePrefetch.MAX_AHEAD == 3, str(_EdgePrefetch.MAX_AHEAD))
     pf.close()
 
     # v1.7：句子停顿间隔设置

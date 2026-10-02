@@ -1,6 +1,9 @@
 pyttsx3>=2.90
 pypdfium2>=4.0
 python-docx>=1.1
+markdown-it-py>=3.0,<5
+beautifulsoup4>=4.12,<5
+olefile>=0.47,<0.48
 charset-normalizer>=3.0
 mobi>=0.4.1
 edge-tts>=6.0

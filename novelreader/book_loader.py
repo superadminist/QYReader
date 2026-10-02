@@ -6,6 +6,7 @@ import zipfile
 from html.parser import HTMLParser
 
 from .chapterizer import split_chapters, fallback_split
+from .document_text import DocumentTextError
 
 try:
     import docx as _docx
@@ -17,7 +18,7 @@ except Exception:  # pragma: no cover
     _mobi = None
 
 SUPPORTED_EXTS = {
-    ".txt", ".epub", ".mobi", ".azw3", ".pdf", ".docx", ".html", ".htm", ".zip",
+    ".txt", ".md", ".markdown", ".epub", ".mobi", ".azw3", ".pdf", ".doc", ".docx", ".html", ".htm", ".zip",
 }
 
 
@@ -101,7 +102,7 @@ def _decode(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-CONTENT_CACHE_VERSION = 9  # 无章节长文按约 5000 字可靠拆分，旧缓存需重新解析
+CONTENT_CACHE_VERSION = 10  # Word 表格及 HTML 标题提取更新，旧缓存需重新解析
 
 
 def normalize_body(text: str) -> str:
@@ -143,7 +144,7 @@ def _make_chapters(text: str) -> list:
 class _TextExtractor(HTMLParser):
     BLOCK_TAGS = {
         "p", "div", "h1", "h2", "h3", "h4", "h5", "h6",
-        "li", "blockquote", "section", "article", "tr", "pre",
+        "li", "blockquote", "section", "article", "tr", "td", "th", "pre",
     }
 
     def __init__(self):
@@ -325,7 +326,16 @@ def _parse_docx(path):
     if _docx is None:
         raise ValueError("未安装 python-docx，无法解析 docx")
     d = _docx.Document(path)
-    lines = [p.text for p in d.paragraphs if p.text and p.text.strip()]
+    # Preserve paragraph/table order, including text in Word table cells.
+    from docx.oxml.ns import qn
+    from docx.text.paragraph import Paragraph
+    lines = []
+    for block in d.element.body:
+        if block.tag in (qn("w:p"), qn("w:tbl")):
+            for paragraph in block.iter(qn("w:p")):
+                value = Paragraph(paragraph, d).text
+                if value.strip():
+                    lines.append(value)
     text = "\n".join(lines)
     try:
         title = d.core_properties.title or os.path.splitext(os.path.basename(path))[0]
@@ -336,12 +346,50 @@ def _parse_docx(path):
     return BookContent(title, author, "docx", _make_chapters(text))
 
 
+def _parse_markdown(path):
+    from .document_text import markdown_sections
+
+    with open(path, "rb") as stream:
+        heading, sections = markdown_sections(_decode(stream.read()))
+    chapters = [Chapter(title, normalize_body(body)) for title, body in sections]
+    if not chapters:
+        raise DocumentTextError("Markdown 未提取到可阅读正文（代码块和图片不作为正文）。")
+    title = heading or os.path.splitext(os.path.basename(path))[0]
+    return BookContent(title, "", "md", chapters)
+
+
+def _parse_doc(path):
+    from .document_text import read_doc
+
+    # Some editors save DOC-named HTML or DOCX; recognize real content.
+    if zipfile.is_zipfile(path):
+        book = _parse_docx(path)
+        book.format = "doc"
+        return book
+    with open(path, "rb") as stream:
+        prefix = stream.read(1024).lstrip()
+    if re.match(br"(?i)(?:<!doctype\s+html|<html\b)", prefix):
+        book = _parse_html(path)
+        book.format = "doc"
+        return book
+    text = normalize_body(read_doc(path))
+    if not text:
+        raise DocumentTextError("DOC 未提取到可阅读正文。")
+    title = os.path.splitext(os.path.basename(path))[0]
+    return BookContent(title, "", "doc", _make_chapters(text))
+
+
 def _parse_html(path):
     with open(path, "rb") as f:
         raw = f.read()
-    text = _extract_html(raw)
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(_decode(raw), "html.parser")
+    source = soup.find("meta", attrs={"name": "qyreader-source-url"})
+    text = _extract_html(str(soup.body or soup))
     title = os.path.splitext(os.path.basename(path))[0]
-    return BookContent(title, "", "html", _make_chapters(text))
+    if soup.title and soup.title.get_text(strip=True):
+        title = soup.title.get_text(strip=True)
+    return BookContent(title, "", "web" if source else "html", _make_chapters(text))
 
 
 def _parse_zip(path):
@@ -415,10 +463,13 @@ def _finalize(chapters, fmt):
 
 _PARSERS = {
     ".txt": _parse_txt,
+    ".md": _parse_markdown,
+    ".markdown": _parse_markdown,
     ".epub": _parse_epub,
     ".mobi": _parse_mobi,
     ".azw3": _parse_mobi,
     ".pdf": _parse_pdf,
+    ".doc": _parse_doc,
     ".docx": _parse_docx,
     ".html": _parse_html,
     ".htm": _parse_html,

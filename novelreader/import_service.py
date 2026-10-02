@@ -9,11 +9,13 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from html import escape
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
 from . import book_loader
+from .document_text import DocumentTextError
 from .library_lock import library_write_lock
 from .library_service import default_library_path, _manual_order
 from .storage import Storage
@@ -262,6 +264,50 @@ class LibraryImportService:
         books = payload.get("books", {})
         return books
 
+    def import_web_page(
+        self,
+        url: str,
+        cancel_event: threading.Event,
+        progress_callback: ProgressCallback,
+    ) -> dict[str, Any]:
+        from .web_reader import fetch_article, WebReaderError, WebReadCancelled
+
+        self._validate_library_for_write()
+        try:
+            article = fetch_article(url, cancel_event)
+        except WebReadCancelled:
+            return {**self._empty_result([], "cancelled"), "total": 1}
+        except WebReaderError as exc:
+            raise ImportServiceError(exc.code, str(exc), retryable=True) from exc
+        if cancel_event.is_set():
+            return {**self._empty_result([], "cancelled"), "total": 1}
+
+        snapshot_dir = self.library_path.parent / "webpages"
+        snapshot = snapshot_dir / f"{int(time.time())}-{uuid.uuid4().hex}.html"
+        html = (
+            '<!doctype html><html><head><meta charset="utf-8">'
+            f'<meta name="qyreader-source-url" content="{escape(article.url, quote=True)}">'
+            f'<title>{escape(article.title)}</title></head><body>'
+            + "".join(f"<p>{escape(line)}</p>" for line in article.text.splitlines())
+            + "</body></html>"
+        )
+        try:
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            snapshot.write_text(html, encoding="utf-8")
+        except OSError as exc:
+            raise ImportServiceError("WEB_WRITE_FAILED", "无法保存网页正文，请检查数据目录是否可写。") from exc
+        try:
+            candidate = self.inspect_files([os.fspath(snapshot)])[0]
+            candidate = replace(candidate, name=article.title, format="WEB")
+            # Finish this single item once its snapshot exists, as with pasted text.
+            result = self.import_files([candidate], "overwrite", True, threading.Event(), progress_callback)
+            if not result["succeeded"]:
+                snapshot.unlink(missing_ok=True)
+            return result
+        except Exception:
+            snapshot.unlink(missing_ok=True)
+            raise
+
     def _validate_library_for_write(self) -> dict[str, Any]:
         if not self.library_path.exists():
             return {"books": {}, "settings": {}}
@@ -331,7 +377,7 @@ class LibraryImportService:
             if parse_error is not None:
                 raise ImportServiceError(
                     "PARSE_FAILED",
-                    "无法解析该文件，请检查文件是否完整。",
+                    str(parse_error) if isinstance(parse_error, DocumentTextError) else "无法解析该文件，请检查文件是否完整。",
                 ) from parse_error
             raise ImportServiceError("FILE_NOT_FOUND", "所选文件不存在或无法访问。")
 
@@ -344,7 +390,7 @@ class LibraryImportService:
         if parse_error is not None:
             raise ImportServiceError(
                 "PARSE_FAILED",
-                "无法解析该文件，请检查文件是否完整。",
+                str(parse_error) if isinstance(parse_error, DocumentTextError) else "无法解析该文件，请检查文件是否完整。",
             ) from parse_error
         raise ImportServiceError("FILE_NOT_FOUND", "所选文件不存在或无法访问。")
 

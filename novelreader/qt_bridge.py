@@ -39,7 +39,7 @@ SCHEMA_VERSION = 2
 CAPABILITIES = {
     "fileImport": True,
     "pasteImport": True,
-    "webImport": False,
+    "webImport": True,
     "audioImport": False,
     "reader": True,
     "tts": True,
@@ -125,7 +125,7 @@ class DesktopBridge(QObject):
         library_path = getattr(self._library, "path", None)
         self._library_editor = LibraryEditService(library_path)
         self._importer = importer or LibraryImportService(library_path)
-        self._reader = reader or ReaderService(library_path)
+        self._reader = reader or ReaderService(library_path, deferred_progress=True)
         self._playback = playback or PlaybackService(SpeechController())
         self._app = app_preferences or AppPreferencesService(library_path)
         self._software_updates = software_updates or SoftwareUpdateService()
@@ -339,6 +339,26 @@ class DesktopBridge(QObject):
         )
 
     @Slot(str, result=str)
+    def startWebImport(self, request_json: str) -> str:
+        from .web_reader import validate_web_url, WebReaderError
+
+        empty = {"jobId": "", "state": "queued"}
+        request = self._request_object(request_json)
+        if request is None or not isinstance(request.get("url"), str):
+            return self._error_response(empty, "INVALID_REQUEST", "网页导入请求参数不完整。")
+        if self._active_job_id:
+            return self._error_response(empty, "IMPORT_BUSY", "已有导入任务正在进行，请稍候。")
+        try:
+            url = validate_web_url(request["url"])
+        except WebReaderError as exc:
+            return self._error_response(empty, exc.code, str(exc))
+        importer = self._importer
+        return self._start_import_job(
+            lambda cancel, progress: importer.import_web_page(url, cancel, progress),
+            (), failure_name="网页正文",
+        )
+
+    @Slot(str, result=str)
     def cancelImport(self, job_id: str) -> str:
         data = {"jobId": str(job_id or ""), "cancelRequested": False}
         if not job_id or job_id != self._active_job_id or self._import_cancel is None:
@@ -353,8 +373,12 @@ class DesktopBridge(QObject):
         if self._active_job_id or self._reader_open_request_id:
             return self._error_response(empty, "LIBRARY_BUSY", "正在导入或打开内容，请稍后重试。", True)
         try:
-            data = self._library_editor.remove_book(book_id)
             identity = self._playback.session_identity()
+            if identity["bookId"] == book_id:
+                flush = getattr(self._reader, "flush_progress", None)
+                if callable(flush):
+                    flush()
+            data = self._library_editor.remove_book(book_id)
             if identity["bookId"] == book_id:
                 try:
                     self._playback.control("stop", session_id=identity["sessionId"])
@@ -425,6 +449,7 @@ class DesktopBridge(QObject):
 
         def worker() -> None:
             try:
+                self._flush_reader_progress()
                 data = reader.open_book(safe_book_id)
                 content = reader.get_session_content(data["sessionId"])
                 settings = data["settings"]
@@ -639,9 +664,12 @@ class DesktopBridge(QObject):
             return self._error_response(empty, "INVALID_REQUEST", "播放请求格式不正确。")
         try:
             session_id = request.get("sessionId")
-            return self._ok_response(self._playback.control(
+            result = self._playback.control(
                 request.get("command"), session_id=session_id
-            ))
+            )
+            if request.get("command") in {"pause", "stop"}:
+                self._flush_reader_progress(wait=False)
+            return self._ok_response(result)
         except Exception as exc:
             return self._reader_error_response(empty, exc)
 
@@ -1191,6 +1219,31 @@ class DesktopBridge(QObject):
             if thread is not None and thread.is_alive():
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
         self._playback.shutdown(2.0)
+        try:
+            self._flush_reader_progress()
+        except ReaderServiceError as exc:
+            self._emit_error(exc.code, exc.user_message)
+        finally:
+            close_reader = getattr(self._reader, "shutdown", None)
+            if callable(close_reader):
+                try:
+                    close_reader()
+                except ReaderServiceError as exc:
+                    self._emit_error(exc.code, exc.user_message)
+
+    def _flush_reader_progress(self, *, wait=True) -> None:
+        flush = getattr(self._reader, "flush_progress", None)
+        if not callable(flush):
+            return
+        identity = self._playback.session_identity()
+        if identity.get("sessionId"):
+            position = self._playback.snapshot()["position"]
+            try:
+                self._reader.update_position(identity["sessionId"], position["chapterIndex"], position["charOffset"])
+            except ReaderServiceError as exc:
+                if exc.code != "READER_SESSION_EXPIRED":
+                    raise
+        flush(wait=wait)
 
     def _floating_window_handle(self):
         getter = getattr(self._window, "floatingWindowHandle", None)
@@ -1283,6 +1336,11 @@ class DesktopBridge(QObject):
             self.importFinished.emit(_json(event))
 
     def _drain_reader_events(self) -> None:
+        errors = getattr(self._reader, "progress_errors", None)
+        if callable(errors):
+            for exc in errors():
+                if isinstance(exc, ReaderServiceError):
+                    self._emit_error(exc.code, exc.user_message)
         while True:
             try:
                 event_type, payload = self._reader_events.get_nowait()
@@ -1339,6 +1397,11 @@ class DesktopBridge(QObject):
                 except ReaderServiceError as exc:
                     self._emit_error(exc.code, exc.user_message)
             self.readerPlaybackChanged.emit(_json(event))
+            if event.get("reason") == "finished":
+                flush = getattr(self._reader, "flush_progress", None)
+                if callable(flush):
+                    flush(wait=False)
+        if events:
             self._emit_floating_state_if_visible()
 
     @staticmethod

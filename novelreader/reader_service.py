@@ -17,6 +17,7 @@ from . import book_loader
 from .library_lock import library_write_lock
 from .library_service import default_library_path
 from .storage import Storage
+from .progress_writer import ProgressWriter
 
 
 WINDOW_CHAR_LIMIT = 20_000
@@ -81,12 +82,15 @@ SearchProgress = Callable[[int, int], None]
 class ReaderService:
     """Serve one active real-book session without exposing source paths."""
 
-    def __init__(self, library_path: str | os.PathLike[str] | None = None):
+    def __init__(self, library_path: str | os.PathLike[str] | None = None, *, deferred_progress: bool = False):
         self.library_path = Path(library_path) if library_path is not None else default_library_path()
         self._session_lock = threading.RLock()
         self._session: _ReaderSession | None = None
+        self._deferred_progress = deferred_progress
+        self._progress_writer: ProgressWriter | None = None
 
     def open_book(self, book_id: str) -> dict[str, Any]:
+        self.flush_progress()
         safe_book_id = str(book_id or "")
         if not safe_book_id:
             raise ReaderServiceError("INVALID_REQUEST", "书籍编号不能为空。")
@@ -181,6 +185,8 @@ class ReaderService:
             else:
                 raise ReaderServiceError("INVALID_REQUEST", "不支持该阅读导航方式。")
             session.position = position
+            if self._deferred_progress:
+                self._queue_progress(session.book_id, position)
             window = self._content_window(
                 session,
                 position["chapterIndex"],
@@ -197,25 +203,48 @@ class ReaderService:
         with self._session_lock:
             session = self._require_session(session_id)
             position = self._normalized_position(session.content, chapter_index, char_offset)
-            with library_write_lock(self.library_path):
-                self._validate_library()
-                storage = Storage(os.fspath(self.library_path))
-                if not storage.get_book(session.book_id):
-                    raise ReaderServiceError("BOOK_NOT_FOUND", "内容库中不存在该书籍。")
-                try:
-                    storage.update_reading_state(session.book_id, {
-                        "chapter_idx": position["chapterIndex"],
-                        "char_offset": position["charOffset"],
-                        "percent": round(position["progressPercent"], 3),
-                    })
-                except Exception as exc:
-                    raise ReaderServiceError(
-                        "LIBRARY_WRITE_FAILED",
-                        "无法保存阅读进度，请检查数据目录是否可写。",
-                        retryable=True,
-                    ) from exc
+            if self._deferred_progress and position == session.position:
+                return {"updated": False, "position": dict(position)}
+            if self._deferred_progress:
+                self._queue_progress(session.book_id, position)
+            else:
+                self._save_position(session.book_id, position)
             session.position = position
             return {"updated": True, "position": dict(position)}
+
+    def _save_position(self, book_id, position):
+        with library_write_lock(self.library_path):
+            self._validate_library()
+            storage = Storage(os.fspath(self.library_path))
+            if not storage.get_book(book_id):
+                raise ReaderServiceError("BOOK_NOT_FOUND", "内容库中不存在该书籍。")
+            try:
+                storage.update_reading_state(book_id, {
+                    "chapter_idx": position["chapterIndex"],
+                    "char_offset": position["charOffset"],
+                    "percent": round(position["progressPercent"], 3),
+                })
+            except Exception as exc:
+                raise ReaderServiceError("LIBRARY_WRITE_FAILED", "无法保存阅读进度，请检查数据目录是否可写。", retryable=True) from exc
+
+    def _queue_progress(self, book_id, position):
+        if self._progress_writer is None:
+            self._progress_writer = ProgressWriter(self._save_position)
+        self._progress_writer.submit(book_id, position)
+
+    def flush_progress(self, *, wait=True):
+        if self._progress_writer is not None:
+            if wait:
+                self._progress_writer.flush()
+            else:
+                self._progress_writer.request_flush()
+
+    def progress_errors(self):
+        return self._progress_writer.drain_errors() if self._progress_writer else []
+
+    def shutdown(self):
+        if self._progress_writer is not None:
+            self._progress_writer.close()
 
     def update_settings(self, session_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         """Validate and persist the reader-facing subset of legacy settings."""
@@ -425,6 +454,7 @@ class ReaderService:
                 return
             if session_id and self._session.session_id != session_id:
                 return
+            self.flush_progress()
             self._session = None
 
     def _require_session(self, session_id: str) -> _ReaderSession:
