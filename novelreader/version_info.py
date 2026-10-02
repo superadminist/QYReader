@@ -6,6 +6,14 @@ APP_NAME = "启远阅读"
 # 最新版本在前。每次发版时在此追加新条目，并同步更新 novelreader/__init__.py 的 __version__。
 VERSION_HISTORY = [
     {
+        "version": "2.1.7",
+        "date": "2026-10-02",
+        "changes": [
+            "调整 Windows 透明窗口合成，处理内容库标题、按钮与书封同时闪白的问题",
+            "默认使用 Qt 软件合成，保留主窗口与悬浮窗圆角、封面悬停动画",
+        ],
+    },
+    {
         "version": "2.1.6",
         "date": "2026-10-02",
         "changes": [

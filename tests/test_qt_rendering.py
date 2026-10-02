@@ -16,8 +16,17 @@ class QtRenderingTests(unittest.TestCase):
         configure_rendering(environment, "win32")
         self.assertEqual(environment, before)
 
-    def test_default_and_explicit_hardware_mode_preserve_environment(self):
-        for platform, environment in (("linux", {}), ("win32", {}),
+    def test_default_windows_uses_raster_composition_without_forcing_chromium_gpu_off(self):
+        environment = {"QTWEBENGINE_CHROMIUM_FLAGS": '--custom="two words"'}
+        self.assertEqual(configure_rendering(environment, "win32"), "software-composition")
+        self.assertEqual(environment["QT_QUICK_BACKEND"], "software")
+        self.assertEqual(environment["QTWEBENGINE_CHROMIUM_FLAGS"], '--custom="two words"')
+        before = dict(environment)
+        configure_rendering(environment, "win32")
+        self.assertEqual(environment, before)
+
+    def test_non_windows_explicit_hardware_and_external_backend_preserve_environment(self):
+        for platform, environment in (("linux", {}),
                                       ("win32", {"QYREADER_RENDER_MODE": "hardware"}),
                                       ("win32", {"QTWEBENGINE_CHROMIUM_FLAGS": "--custom", "QT_QUICK_BACKEND": "custom"})):
             before = dict(environment)
