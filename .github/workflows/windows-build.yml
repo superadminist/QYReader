@@ -44,8 +44,8 @@ jobs:
       - name: Test and build frontend
         run: |
           npm.cmd --prefix prototype run test:bridge
-          npm.cmd --prefix prototype run test:sites
           npm.cmd --prefix prototype run build
+          npm.cmd --prefix prototype run test:sites
 
       - name: Install Python dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt -r build-requirements.txt

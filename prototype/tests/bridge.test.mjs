@@ -863,7 +863,7 @@ test("active reader scrolls cannot passively move the shared playback sentence",
 
 test("return-to-current-reader-text is a scroll-only playback-bar action", async () => {
   const source = await readFile(new URL("../src/App.jsx", import.meta.url), "utf8");
-  const handler = source.match(/const locateCurrentSentence = \(\) => \{[\s\S]*?\n  \};\n  const handleScroll/);
+  const handler = source.match(/const locateCurrentSentence = \(\) => \{[\s\S]*?\r?\n  \};\r?\n  const handleScroll/);
   assert.ok(handler);
   assert.match(handler[0], /target\.scrollIntoView\(\{ block: "center", behavior: "smooth" \}\)/);
   assert.match(handler[0], /onGetWindow\(current\.chapterIndex, current\.startOffset\)/);
