@@ -116,7 +116,7 @@ class DesktopBridgeTests(unittest.TestCase):
         self.assertEqual(payload["schemaVersion"], SCHEMA_VERSION)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["data"]["library"]["total"], 1)
-        self.assertEqual(payload["data"]["app"]["version"], "2.1.3")
+        self.assertEqual(payload["data"]["app"]["version"], "2.1.4")
         self.assertEqual(payload["data"]["preferences"]["theme"], "护眼")
         self.assertTrue(payload["data"]["preferences"]["autoOpenLast"])
         self.assertFalse(payload["data"]["preferences"]["closeToTray"])

@@ -14,6 +14,7 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 - Match the supplied `key-ui` screenshots as a macOS-style desktop reading experience.
 - Content-library cards use an app-styled Chinese context menu for management actions; never expose WebEngine's generic browser menu on a book card. Label removal by its exact effect and confirm it before changing the library.
 - Each reading theme applies to the whole main interface: title bar, rail, directory, toolbar, reading canvas, player, library and dialogs share one neutral surface family and one accent palette. Keep only a subtle lighter reading-paper layer; do not mix blue-white chrome with green or beige reading areas.
+- The user rejected the all-green eye-protection interface. Day and eye-protection modes keep a neutral gray-white chassis and the original blue-purple brand buttons/selection accents; eye protection uses a softer neutral reading background, without recoloring the whole window or controls green.
 - Avoid redundant full-window clip-path and CSS backdrop-filter composition on the translucent desktop host. Preserve the 22px/30px antialiased border-radius with overflow clipping and the floating two-pixel inset.
 - Include the content library, reading view, chapter directory, import-text dialog, playback bar, and bilingual floating reader.
 - The floating reader must be movable and freely resizable from its lower-right corner.

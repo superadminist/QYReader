@@ -577,13 +577,13 @@ input[type="range"] { height: 3px; accent-color: #6875d8; cursor: pointer; }
 .prototype-stage[data-theme="白天"] {
   --ui-page: #f5f6f8; --ui-panel: #f5f6f8; --ui-canvas: #f5f6f8; --ui-reader: #fff; --ui-raised: #fff;
   --ui-text: #272c35; --ui-muted: #626c7b; --ui-border: #dde1e8; --ui-soft: #e9ecf2;
-  --ui-accent: #5361b8; --ui-control: #5e6bc4; --ui-selected: #e4e8f8; --ui-selected-text: #4553a2;
+  --ui-accent: #5361c5; --ui-control: #6875d9; --ui-selected: #e8ebff; --ui-selected-text: #4554b9;
 }
 .prototype-stage[data-theme="护眼"] {
-  --ui-page: #eef2e9; --ui-panel: #eef2e9; --ui-canvas: #eef2e9; --ui-reader: #f7f9f2; --ui-raised: #f7f9f2;
-  --ui-text: #2d382e; --ui-muted: #616f60; --ui-border: #d8e0d2; --ui-soft: #e3e9dc;
-  --ui-accent: #4f7158; --ui-control: #55755c; --ui-selected: #dbe6d5; --ui-selected-text: #36543d;
-  --ui-highlight: #dfebc8; --ui-highlight-text: #2d382e; --ui-scrollbar: #a8b5a0;
+  --ui-page: #f1f2f4; --ui-panel: #f1f2f4; --ui-canvas: #f1f2f4; --ui-reader: #f8f8f8; --ui-raised: #f8f8f8;
+  --ui-text: #272c35; --ui-muted: #626c7b; --ui-border: #dce0e7; --ui-soft: #e7eaf0;
+  --ui-accent: #5361c5; --ui-control: #6875d9; --ui-selected: #e8ebff; --ui-selected-text: #4554b9;
+  --ui-highlight: #fff0b9; --ui-highlight-text: #373b43; --ui-scrollbar: #b5becd;
 }
 .prototype-stage[data-theme="米黄"] {
   --ui-reader: #fbf5e8; --ui-canvas: #f2eadb; --ui-page: #f2eadb; --ui-panel: #f2eadb; --ui-raised: #fbf5e8;
