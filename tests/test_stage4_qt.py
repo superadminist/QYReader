@@ -290,6 +290,7 @@ class Stage4FloatingServiceTests(unittest.TestCase):
             self.assertEqual(state["settings"]["fontSize"], 14)
             self.assertEqual(state["settings"]["background"], "sepia")
             self.assertTrue(state["settings"]["hoverDisplayEnabled"])
+            self.assertFalse(state["settings"]["progressSeekEnabled"])
 
             state = service.update_settings({
                 "backgroundOpacity": 0.8,
@@ -299,11 +300,13 @@ class Stage4FloatingServiceTests(unittest.TestCase):
                 "background": "dark",
                 "textColor": "#12abEF",
                 "hoverDisplayEnabled": False,
+                "progressSeekEnabled": True,
             })
             self.assertEqual(state["settings"]["backgroundOpacity"], 0.8)
             self.assertEqual(state["settings"]["textColor"], "#12ABEF")
             self.assertFalse(state["settings"]["followReaderFont"])
             self.assertFalse(state["settings"]["hoverDisplayEnabled"])
+            self.assertTrue(state["settings"]["progressSeekEnabled"])
             service.update_geometry("600x300-1800+80")
             stored = json.loads(library_path.read_text(encoding="utf-8"))
             self.assertIn("kept", stored["books"])
@@ -313,6 +316,7 @@ class Stage4FloatingServiceTests(unittest.TestCase):
             self.assertEqual(stored["settings"]["floating_reader_text_color"], "#12ABEF")
             self.assertFalse(stored["settings"]["floating_reader_follow_font"])
             self.assertFalse(stored["settings"]["floating_reader_hover_display"])
+            self.assertTrue(stored["settings"]["floating_reader_progress_seek"])
 
             reloaded = FloatingReaderService(playback, library_path).state()["settings"]
             self.assertEqual(reloaded["backgroundOpacity"], 0.8)
@@ -320,11 +324,14 @@ class Stage4FloatingServiceTests(unittest.TestCase):
             self.assertEqual(reloaded["textColor"], "#12ABEF")
             self.assertFalse(reloaded["followReaderFont"])
             self.assertFalse(reloaded["hoverDisplayEnabled"])
+            self.assertTrue(reloaded["progressSeekEnabled"])
+            service.update_settings({"progressSeekEnabled": False})
+            self.assertFalse(FloatingReaderService(playback, library_path).state()["settings"]["progressSeekEnabled"])
 
     def test_invalid_patch_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             service = FloatingReaderService(_Playback(), Path(temp) / "library.json")
-            for patch in ({"geometry": "x"}, {"backgroundOpacity": -0.01}, {"fontSize": True}, {"textColor": "red"}, {"hoverDisplayEnabled": "yes"}):
+            for patch in ({"geometry": "x"}, {"backgroundOpacity": -0.01}, {"fontSize": True}, {"textColor": "red"}, {"hoverDisplayEnabled": "yes"}, {"progressSeekEnabled": "yes"}):
                 with self.assertRaises(FloatingReaderError):
                     service.update_settings(patch)
 

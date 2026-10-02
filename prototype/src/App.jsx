@@ -122,7 +122,7 @@ const EMPTY_FLOATING_STATE = {
   visible: false,
   sessionId: "",
   bookId: "",
-  settings: { geometry: "", topmost: false, backgroundOpacity: 1, fontSize: 20, followReaderFont: true, background: "light", bilingual: false, textColor: "auto", hoverDisplayEnabled: true },
+  settings: { geometry: "", topmost: false, backgroundOpacity: 1, fontSize: 20, followReaderFont: true, background: "light", bilingual: false, textColor: "auto", hoverDisplayEnabled: true, progressSeekEnabled: false },
   playback: { status: "idle", position: { chapterIndex: 0, charOffset: 0, progressPercent: 0 }, sentence: null, requestedBackend: "sapi", activeBackend: null, fallbackActive: false },
   context: { chapterIndex: 0, chapterTitle: "", previous: null, current: null, next: null },
 };
@@ -726,7 +726,88 @@ function FloatingLyricLayer({ context, className = "", hidden = false }) {
   );
 }
 
-function NativeFloatingReader({ state, loading, error, networkNotice, pointerInside, resizing, onPointerInsideChange, pendingCommand, pendingSetting, onCommand, onSettings, onClose, onReturnToMain, onMove, onResize }) {
+function FloatingProgress({ percent, enabled, disabled, sessionId, onSeek, onInteractionChange }) {
+  const [preview, setPreview] = useState(null);
+  const draggingRef = useRef(false);
+  const changedRef = useRef(false);
+  const previewRef = useRef(null);
+  const progress = Math.max(0, Math.min(100, Number(percent) || 0));
+  const visibleProgress = preview ?? progress;
+  const cancel = useCallback(() => {
+    draggingRef.current = false;
+    changedRef.current = false;
+    previewRef.current = null;
+    setPreview(null);
+    onInteractionChange(false);
+  }, [onInteractionChange]);
+  useEffect(() => { cancel(); }, [enabled, disabled, sessionId, cancel]);
+  const previewPointer = (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const next = Math.round(Math.max(0, Math.min(1, (event.clientX - rect.left - 6) / Math.max(1, rect.width - 12))) * 1000) / 10;
+    previewRef.current = next;
+    changedRef.current = true;
+    setPreview(next);
+  };
+  const commit = (value) => {
+    const next = Math.max(0, Math.min(100, Number(value) || 0));
+    const changed = changedRef.current;
+    cancel();
+    if (enabled && !disabled && changed) onSeek(next);
+  };
+  return (
+    <div className="floating-progress" data-seek-enabled={enabled ? "true" : "false"}>
+      {enabled ? (
+        <input
+          className="floating-progress-slider"
+          aria-label="全文朗读进度"
+          aria-valuetext={`全文 ${visibleProgress.toFixed(1)}%`}
+          type="range" min="0" max="100" step="0.1"
+          value={visibleProgress} disabled={disabled}
+          style={{ "--read-progress": `${visibleProgress}%` }}
+          onPointerDown={(event) => {
+            if (event.button !== 0 || disabled) return;
+            event.preventDefault();
+            event.currentTarget.focus();
+            draggingRef.current = true;
+            changedRef.current = false;
+            onInteractionChange(true);
+            event.currentTarget.setPointerCapture(event.pointerId);
+            previewPointer(event);
+          }}
+          onPointerMove={(event) => { if (draggingRef.current) previewPointer(event); }}
+          onChange={(event) => {
+            changedRef.current = true;
+            previewRef.current = Number(event.target.value);
+            setPreview(previewRef.current);
+          }}
+          onPointerUp={(event) => {
+            if (!draggingRef.current) return;
+            previewPointer(event);
+            commit(previewRef.current);
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+          }}
+          onPointerCancel={cancel}
+          onLostPointerCapture={() => { if (draggingRef.current) cancel(); }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); cancel(); }
+          }}
+          onKeyUp={(event) => {
+            if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commit(event.currentTarget.value);
+          }}
+          onBlur={(event) => { if (!draggingRef.current && changedRef.current) commit(event.currentTarget.value); }}
+          title="点击或拖动调整朗读进度"
+        />
+      ) : (
+        <div className="floating-progress-track" role="progressbar" aria-label="全文朗读进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
+          <span style={{ width: `${progress}%` }} />
+        </div>
+      )}
+      <span className="floating-progress-label">全文 {visibleProgress.toFixed(1)}%</span>
+    </div>
+  );
+}
+
+function NativeFloatingReader({ state, loading, error, networkNotice, pointerInside, resizing, onPointerInsideChange, pendingCommand, pendingSetting, onCommand, onSeek, onSettings, onClose, onReturnToMain, onMove, onResize }) {
   const { settings, playback, context } = state;
   const playing = playback.status === "playing";
   const canControlPlayback = Boolean(state.sessionId) && !pendingCommand;
@@ -745,10 +826,11 @@ function NativeFloatingReader({ state, loading, error, networkNotice, pointerIns
   const [renderedContext, setRenderedContext] = useState(context);
   const [departingLyric, setDepartingLyric] = useState(null);
   const [lyricDirection, setLyricDirection] = useState("");
+  const [progressDragging, setProgressDragging] = useState(false);
   const hoverDisplayEnabled = settings.hoverDisplayEnabled !== false;
   const pointerBeforeResizeRef = useRef(pointerInside);
   useEffect(() => { if (!resizing) pointerBeforeResizeRef.current = pointerInside; }, [resizing, pointerInside]);
-  const interactionVisible = resizing ? pointerBeforeResizeRef.current : pointerInside;
+  const interactionVisible = resizing ? pointerBeforeResizeRef.current : pointerInside || progressDragging;
   const effectiveNetworkNotice = networkNotice || (playback.fallbackActive ? NETWORK_FALLBACK_NOTICE : null);
 
   useEffect(() => {
@@ -885,6 +967,7 @@ function NativeFloatingReader({ state, loading, error, networkNotice, pointerIns
       </section>
       {error ? <div className="floating-error" role="alert">{error}</div> : effectiveNetworkNotice ? <div className="floating-network-slot"><NetworkStatusHint notice={effectiveNetworkNotice} compact /></div> : null}
       <footer className="floating-controls">
+        <FloatingProgress percent={playback.position.progressPercent} enabled={settings.progressSeekEnabled === true} disabled={!canControlPlayback || loading || settingPending("progressSeekEnabled")} sessionId={state.sessionId} onSeek={onSeek} onInteractionChange={setProgressDragging} />
         <div className="control-cluster">
           <IconButton label="上一句" onClick={canControlPlayback ? () => onCommand("previousSentence") : undefined}><CaretLeft weight="fill" /></IconButton>
           <button className="floating-play" aria-label={playing ? "暂停" : "播放"} disabled={!canControlPlayback} onClick={() => onCommand(playing ? "pause" : "play")}>{playing ? <Pause weight="fill" /> : <Play weight="fill" />}</button>
@@ -915,6 +998,7 @@ function FloatingApplication() {
   const [error, setError] = useState("");
   const [networkNotice, handlePlaybackEvent] = usePlaybackNetworkNotice(qaMode === "network" ? NETWORK_FALLBACK_NOTICE : null);
   const [pendingCommand, setPendingCommand] = useState("");
+  const [pendingSeek, setPendingSeek] = useState(false);
   const [pendingSettings, setPendingSettings] = useState([]);
   const [pointerInside, setPointerInside] = useState(false);
   const [resizing, setResizing] = useState(false);
@@ -984,6 +1068,20 @@ function FloatingApplication() {
       setError(caught.message || "播放控制失败。");
     }
   };
+  const seekProgress = async (percent) => {
+    const connection = connectionRef.current;
+    const sessionId = floatingState?.sessionId;
+    if (!connection || !sessionId || pendingSeek || !floatingState.settings.progressSeekEnabled) return;
+    setPendingSeek(true);
+    try {
+      const response = await connection.reader.navigate({ sessionId, target: { kind: "percent", percent } });
+      setFloatingState((current) => current?.sessionId === sessionId ? { ...current, playback: response.data.playback } : current);
+    } catch (caught) {
+      setError(caught.message || "无法跳转到目标朗读进度。");
+    } finally {
+      setPendingSeek(false);
+    }
+  };
   const updateSettings = async (patch) => {
     const connection = connectionRef.current;
     if (!connection) return;
@@ -1043,9 +1141,10 @@ function FloatingApplication() {
         loading={!floatingState}
         error={error}
         networkNotice={networkNotice}
-        pendingCommand={pendingCommand}
+        pendingCommand={pendingSeek ? "seek" : pendingCommand}
         pendingSetting={pendingSettings}
         onCommand={controlPlayback}
+        onSeek={seekProgress}
         onSettings={updateSettings}
         onClose={close}
         onReturnToMain={returnToMain}
@@ -1444,6 +1543,7 @@ function SettingsModal({ preferences, speech, floatingSettings, version, softwar
             <section className="settings-section floating-settings-section"><h3>悬浮朗读</h3>
               <div className="settings-field"><span>悬浮窗背景</span><div className="theme-options compact">{[["light", "浅色"], ["sepia", "米黄"], ["dark", "深色"]].map(([value, label]) => <button key={value} className={floatingSettings.background === value ? "selected" : ""} disabled={isPending("floating", "background")} onClick={() => onUpdateFloating({ background: value })}>{label}</button>)}</div></div>
               <label className="confirmation-row"><input type="checkbox" checked={floatingSettings.hoverDisplayEnabled} disabled={isPending("floating", "hoverDisplayEnabled")} onChange={(event) => onUpdateFloating({ hoverDisplayEnabled: event.target.checked })} />鼠标移开时显示上一段和下一段</label>
+              <label className="confirmation-row"><input type="checkbox" checked={floatingSettings.progressSeekEnabled === true} disabled={isPending("floating", "progressSeekEnabled")} onChange={(event) => onUpdateFloating({ progressSeekEnabled: event.target.checked })} />允许拖动朗读进度（关闭时仅展示）</label>
               <label className="confirmation-row"><input type="checkbox" checked={floatingSettings.followReaderFont} disabled={isPending("floating", "followReaderFont")} onChange={(event) => onUpdateFloating({ followReaderFont: event.target.checked })} />跟随主阅读器字号（滚轮调字号后自动关闭）</label>
               <div className="settings-field color-setting"><span>朗读字体颜色</span><div><input aria-label="悬浮窗朗读字体颜色" title="选择颜色后立即切换为自定义配色" type="color" value={pickerColor} onChange={(event) => { const patch = floatingTextColorPatch(event.target.value); if (patch) onUpdateFloating(patch); }} /><button className={!customTextColor ? "selected" : ""} onClick={() => onUpdateFloating({ textColor: "auto" })}>自动配色</button><span className="color-setting-value">{customTextColor ? floatingSettings.textColor : "选择颜色即使用"}</span></div></div>
             </section>
@@ -1463,7 +1563,7 @@ function SettingsModal({ preferences, speech, floatingSettings, version, softwar
               </div>
               <p className="update-security-note">仅下载版本匹配的 Windows 安装包；SHA256 校验通过后才允许安装。</p>
             </section>
-            <section className="settings-section about-section"><h3>关于</h3><p>启远阅读（QYReader） {version || "2.1.5"} · Qt WebEngine 桌面版</p></section>
+            <section className="settings-section about-section"><h3>关于</h3><p>启远阅读（QYReader） {version || "2.1.6"} · Qt WebEngine 桌面版</p></section>
           </> : null}
         </div>
       </div>

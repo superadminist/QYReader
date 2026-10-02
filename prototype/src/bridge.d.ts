@@ -407,6 +407,7 @@ export interface FloatingReaderSettings {
   bilingual: boolean;
   textColor: "auto" | `#${string}`;
   hoverDisplayEnabled: boolean;
+  progressSeekEnabled: boolean;
 }
 
 export interface FloatingReaderContext {
@@ -493,7 +494,7 @@ export interface FloatingReaderControls {
   updateSettings(input: {
     patch: Partial<Pick<
       FloatingReaderSettings,
-      "topmost" | "backgroundOpacity" | "fontSize" | "followReaderFont" | "background" | "bilingual" | "textColor" | "hoverDisplayEnabled"
+      "topmost" | "backgroundOpacity" | "fontSize" | "followReaderFont" | "background" | "bilingual" | "textColor" | "hoverDisplayEnabled" | "progressSeekEnabled"
     >>;
   }): Promise<BridgeResponse<FloatingReaderState>>;
   startWindowMove(): void;

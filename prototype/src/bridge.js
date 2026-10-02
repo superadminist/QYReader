@@ -22,7 +22,7 @@ function demoFloatingState(visible = false, playback = demoPlayback()) {
     visible,
     sessionId: "demo-reader-session",
     bookId: "demo-3",
-    settings: { geometry: "", topmost: true, backgroundOpacity: 0.94, fontSize: 20, followReaderFont: true, background: "light", bilingual: false, textColor: "auto", hoverDisplayEnabled: true },
+    settings: { geometry: "", topmost: true, backgroundOpacity: 0.94, fontSize: 20, followReaderFont: true, background: "light", bilingual: false, textColor: "auto", hoverDisplayEnabled: true, progressSeekEnabled: false },
     playback,
     context: {
       chapterIndex: 0,
@@ -115,6 +115,7 @@ const FLOATING_SETTING_FIELDS = {
   bilingual: "boolean",
   textColor: "string",
   hoverDisplayEnabled: "boolean",
+  progressSeekEnabled: "boolean",
 };
 const READER_SETTING_FIELDS = {
   fontFamily: "string",
@@ -480,6 +481,7 @@ function validFloatingSettings(settings) {
     && FLOATING_BACKGROUNDS.has(settings.background)
     && typeof settings.bilingual === "boolean"
     && typeof settings.hoverDisplayEnabled === "boolean"
+    && typeof settings.progressSeekEnabled === "boolean"
     && (settings.textColor === "auto" || /^#[0-9A-Fa-f]{6}$/.test(settings.textColor)),
   );
 }
@@ -1404,6 +1406,8 @@ function createDemoConnection() {
           : { chapterIndex: input.target.chapterIndex, charOffset: input.target.charOffset, progressPercent: Math.round(input.target.charOffset / Math.max(1, DEMO_READER_TEXT.length) * 1000) / 10 };
         demoPosition = target;
         demoPlaybackState = { ...demoPlaybackState, position: target };
+        demoFloating = { ...demoFloating, playback: demoPlaybackState };
+        emit(floatingChangedCallbacks, { schemaVersion: SCHEMA_VERSION, state: demoFloating });
         return response({ position: target, window: demoReaderWindow(input.sessionId, demoBookId, target.charOffset), playback: demoPlaybackState });
       },
       async updatePosition(input) {

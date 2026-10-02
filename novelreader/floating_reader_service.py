@@ -22,6 +22,7 @@ DEFAULT_FLOATING_SETTINGS = {
     "bilingual": False,
     "textColor": "auto",
     "hoverDisplayEnabled": True,
+    "progressSeekEnabled": False,
 }
 
 _STORAGE_KEYS = {
@@ -34,6 +35,7 @@ _STORAGE_KEYS = {
     "bilingual": "floating_reader_bilingual",
     "textColor": "floating_reader_text_color",
     "hoverDisplayEnabled": "floating_reader_hover_display",
+    "progressSeekEnabled": "floating_reader_progress_seek",
 }
 _PATCH_KEYS = set(DEFAULT_FLOATING_SETTINGS) - {"geometry"}
 
@@ -102,7 +104,7 @@ class FloatingReaderService:
             raise FloatingReaderError("INVALID_REQUEST", "悬浮窗设置参数不正确。")
         clean = dict(self._settings)
         for key, value in patch.items():
-            if key in {"topmost", "followReaderFont", "bilingual", "hoverDisplayEnabled"}:
+            if key in {"topmost", "followReaderFont", "bilingual", "hoverDisplayEnabled", "progressSeekEnabled"}:
                 if not isinstance(value, bool):
                     raise FloatingReaderError("INVALID_REQUEST", "悬浮窗开关设置不正确。")
                 clean[key] = value
@@ -201,7 +203,7 @@ def normalize_floating_settings(settings: dict[str, Any]) -> dict[str, Any]:
     clean = dict(DEFAULT_FLOATING_SETTINGS)
     geometry = settings.get("geometry")
     clean["geometry"] = str(geometry) if isinstance(geometry, str) else ""
-    for key in ("topmost", "followReaderFont", "bilingual", "hoverDisplayEnabled"):
+    for key in ("topmost", "followReaderFont", "bilingual", "hoverDisplayEnabled", "progressSeekEnabled"):
         value = settings.get(key)
         clean[key] = value if isinstance(value, bool) else DEFAULT_FLOATING_SETTINGS[key]
     opacity = _finite_number(settings.get("backgroundOpacity"))

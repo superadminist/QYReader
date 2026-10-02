@@ -32,6 +32,25 @@ test("demo library removes only the selected book", async () => {
   connection.dispose();
 });
 
+test("demo seeking updates floating and main positions while preserving playback status", async () => {
+  const connection = await connectBridge({ window: {}, document: null });
+  const initial = await connection.floating.show();
+  const sessionId = initial.data.sessionId;
+  assert.equal(initial.data.settings.progressSeekEnabled, false);
+  await connection.floating.updateSettings({ patch: { progressSeekEnabled: true } });
+  const events = [];
+  connection.onFloatingReaderChanged((event) => events.push(event));
+  for (const [command, status, percent] of [["play", "playing", 43.2], ["pause", "paused", 72.5]]) {
+    await connection.reader.controlPlayback({ sessionId, command });
+    const result = await connection.reader.navigate({ sessionId, target: { kind: "percent", percent } });
+    const floating = await connection.floating.getState();
+    assert.equal(result.data.playback.status, status);
+    assert.deepEqual(floating.data.playback, result.data.playback);
+    assert.equal(events.at(-1).state.playback.position.progressPercent, percent);
+  }
+  connection.dispose();
+});
+
 test("native library remove calls the dedicated desktop slot", async () => {
   const env = nativeEnvironment(createDemoInitialState());
   const connection = await connectBridge({ window: env.browserWindow, document: null });
@@ -150,7 +169,7 @@ function floatingFixture(overrides = {}) {
     visible: true,
     sessionId: reader.sessionId,
     bookId: reader.book.id,
-    settings: { geometry: "", topmost: true, backgroundOpacity: 0.94, fontSize: 20, followReaderFont: true, background: "light", bilingual: false, textColor: "auto", hoverDisplayEnabled: true },
+    settings: { geometry: "", topmost: true, backgroundOpacity: 0.94, fontSize: 20, followReaderFont: true, background: "light", bilingual: false, textColor: "auto", hoverDisplayEnabled: true, progressSeekEnabled: false },
     playback: reader.playback,
     context: {
       chapterIndex: 0,
@@ -466,6 +485,9 @@ test("native floating controls use the frozen slots, validate settings and prese
   const connection = await connectBridge({ window: env.browserWindow, document: null });
 
   const state = await connection.floating.getState();
+  assert.equal(state.data.settings.progressSeekEnabled, false);
+  const enabled = await connection.floating.updateSettings({ patch: { progressSeekEnabled: true } });
+  assert.equal(enabled.data.settings.progressSeekEnabled, true);
   await connection.floating.show();
   await connection.floating.updateSettings({ patch: { topmost: false, backgroundOpacity: 0.8, fontSize: 24, followReaderFont: false, background: "sepia", bilingual: true, textColor: "#123ABC", hoverDisplayEnabled: false } });
   connection.floating.startWindowMove();
@@ -479,6 +501,7 @@ test("native floating controls use the frozen slots, validate settings and prese
   assert.equal(returned.data.closed, true);
   assert.deepEqual(env.calls, [
     ["getFloatingReaderState"],
+    ["updateFloatingReaderSettings", JSON.stringify({ patch: { progressSeekEnabled: true } })],
     ["showFloatingReader"],
     ["updateFloatingReaderSettings", JSON.stringify({ patch: { topmost: false, backgroundOpacity: 0.8, fontSize: 24, followReaderFont: false, background: "sepia", bilingual: true, textColor: "#123ABC", hoverDisplayEnabled: false } })],
     ["startFloatingWindowMove"],
@@ -486,6 +509,10 @@ test("native floating controls use the frozen slots, validate settings and prese
     ["closeFloatingReader"],
     ["returnToMainWindow"],
   ]);
+  await assert.rejects(
+    connection.floating.updateSettings({ patch: { progressSeekEnabled: "yes" } }),
+    (error) => error instanceof BridgeProtocolError && error.code === "BRIDGE_INVALID_ARGUMENT",
+  );
   await assert.rejects(
     connection.floating.updateSettings({ patch: { backgroundOpacity: 2 } }),
     (error) => error instanceof BridgeProtocolError && error.code === "BRIDGE_INVALID_ARGUMENT",
@@ -809,14 +836,14 @@ test("floating reader keeps chrome tied to pointer while the switch only control
   const host = await readFile(new URL("../../novelreader/qt_host.py", import.meta.url), "utf8");
   assert.match(css, /--floating-header-row: 0px;/);
   assert.match(css, /--floating-footer-row: 0px;/);
-  assert.match(css, /\.native-floating-surface\[data-interaction-visible="true"\] \{[\s\S]*--floating-header-row: 48px;[\s\S]*--floating-footer-row: 58px;/);
+  assert.match(css, /\.native-floating-surface\[data-interaction-visible="true"\] \{[\s\S]*--floating-header-row: 48px;[\s\S]*--floating-footer-row: 82px;/);
   assert.match(css, /\.native-floating-surface \.floating-dragbar,[\s\S]*visibility: hidden;[\s\S]*pointer-events: none;/);
   assert.match(css, /\.native-floating-surface\[data-interaction-visible="true"\] \.floating-sentence\.previous,[\s\S]*\.native-floating-surface\[data-interaction-visible="true"\] \.floating-sentence\.next,/);
-  assert.match(css, /@media \(hover: none\)[\s\S]*--floating-header-row: 48px;[\s\S]*--floating-footer-row: 58px;/);
+  assert.match(css, /@media \(hover: none\)[\s\S]*--floating-header-row: 48px;[\s\S]*--floating-footer-row: 82px;/);
   assert.match(css, /\.native-floating-surface\[data-hover-display-enabled="false"\] \.floating-sentence\.previous,[\s\S]*\.floating-sentence\.next \{ display: none; \}/);
   assert.match(app, /const \[pointerInside, setPointerInside\] = useState\(false\);/);
   assert.match(app, /connection\.onFloatingPointerChanged\(\(inside\) =>/);
-  assert.match(app, /const interactionVisible = resizing \? pointerBeforeResizeRef\.current : pointerInside;/);
+  assert.match(app, /const interactionVisible = resizing \? pointerBeforeResizeRef\.current : pointerInside \|\| progressDragging;/);
   assert.doesNotMatch(app, /const interactionVisible = !hoverDisplayEnabled/);
   assert.match(app, /root\.dataset\.contextMode = "all";\s*if \(hoverDisplayEnabled && !interactionVisible\)/);
   assert.match(app, /data-pointer-inside=\{pointerInside \? "true" : "false"\}/);

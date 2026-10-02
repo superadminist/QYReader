@@ -28,6 +28,7 @@
 
 | 版本 | 主要更新 |
 | --- | --- |
+| [v2.1.6](release-notes/v2.1.6.md) | 悬浮窗新增全文朗读进度，支持通过开关选择纯展示或点击、拖动跳转。 |
 | [v2.1.5](release-notes/v2.1.5.md) | 新增 MD、DOC 与网页正文阅读，优化内容库动画、滚动、切换和长目录，调整导入入口顺序。 |
 | [v2.1.4](release-notes/v2.1.4.md) | 白天和护眼模式恢复浅灰白界面与蓝紫色按钮，移除整窗绿色配色，保留圆角修复。 |
 | [v2.1.3](release-notes/v2.1.3.md) | 统一四种主题配色，增强缩放过程中的主窗口与悬浮窗圆角，并优化透明窗口交互重绘。 |
@@ -166,7 +167,7 @@ build.bat
 .venv\Scripts\python.exe -m PyInstaller --clean --noconfirm "QYReader.spec"
 ```
 
-当前发布产物为 `dist\installer\QYReader-Setup-2.1.5.exe`。安装向导允许选择安装路径和是否创建桌面图标，默认安装到系统 `Program Files\QYReader`，启动安装程序时会自动请求管理员权限。发布前必须实际完成安装、首次数据迁移、覆盖升级和卸载保留数据验证，并检查 WebEngine 静态资源、导入/阅读、窗口退出清理，以及进程树中不存在 Node、Vite 开发服务器或外部 Python 解释器。仅仅“构建成功”不等于桌面验收通过。
+当前发布产物为 `dist\installer\QYReader-Setup-2.1.6.exe`。安装向导允许选择安装路径和是否创建桌面图标，默认安装到系统 `Program Files\QYReader`，启动安装程序时会自动请求管理员权限。发布前必须实际完成安装、首次数据迁移、覆盖升级和卸载保留数据验证，并检查 WebEngine 静态资源、导入/阅读、窗口退出清理，以及进程树中不存在 Node、Vite 开发服务器或外部 Python 解释器。仅仅“构建成功”不等于桌面验收通过。
 
 推送到 `main` 后，GitHub Actions 的 `Windows installer` 工作流会在 Windows Runner 上运行测试和完整打包，并将安装包及 `SHA256SUMS.txt` 保存为 30 天有效的构建产物。也可以在 GitHub Actions 页面手动触发该工作流；生成文件不会提交进 Git。
 
