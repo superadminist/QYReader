@@ -31,11 +31,44 @@ def native_action(args):
     if args.action == "place":
         probe._place(args.pid, args.role, args.x, args.y, args.width, args.height)
         return probe.snapshot(args.pid)
+    if args.action == "activate":
+        window = probe._role_window(args.pid, args.role)
+        probe.user32.SetForegroundWindow(window["hwnd"])
+        time.sleep(.2)
+        return probe.snapshot(args.pid)
     if args.action == "drag":
         mode = probe._drag(args.pid, args.role, args.from_x, args.from_y, args.dx, args.dy)
         return {**probe.snapshot(args.pid), "dragMode": mode}
     from PIL import ImageGrab
     item = probe._role_window(args.pid, args.role)
+    if args.action == "drag-capture":
+        point = probe.POINT(args.from_x, args.from_y)
+        if not probe.user32.ClientToScreen(item["hwnd"], ctypes.byref(point)):
+            raise ctypes.WinError()
+        probe.user32.SetForegroundWindow(item["hwnd"])
+        if not probe.user32.SetCursorPos(point.x, point.y):
+            raise RuntimeError("Real mouse input is required for live corner capture")
+        time.sleep(.25)
+        images, frames = [], []
+        probe.user32.mouse_event(0x0002, 0, 0, 0, None)
+        try:
+            time.sleep(.1)
+            for index in range(1, 9):
+                probe.user32.SetCursorPos(point.x + round(args.dx * index / 8),
+                                          point.y + round(args.dy * index / 8))
+                time.sleep(.035)
+                rect = probe._role_window(args.pid, args.role)["rect"]
+                image = ImageGrab.grab(bbox=(rect["left"], rect["top"], rect["right"], rect["bottom"]), all_screens=True)
+                images.append(image)
+                frames.append({"nativeRect": rect, "at": time.monotonic(), "available": True})
+        finally:
+            probe.user32.mouse_event(0x0004, 0, 0, 0, None)
+        # Keep PNG compression outside the held mouse gesture.
+        for index, (image, frame) in enumerate(zip(images, frames)):
+            path = Path(args.output_dir) / f"{args.role}-live-{args.cycle:02d}-{index:02d}.png"
+            image.save(path)
+            frame["path"] = str(path)
+        return {"frames": frames, "dragMode": "mouse", **probe.snapshot(args.pid)}
     if args.action == "capture":
         rect = item["rect"]
         try:
@@ -50,10 +83,15 @@ def native_action(args):
     elif args.action == "flow":
         frames = []
         rect = item["rect"]
+        # Keep only this temporary QA window above other apps while capturing.
+        # A nonblack desktop image is not proof that the reader is visible.
+        # No mouse input or persistent app preference is changed.
+        probe.user32.SetWindowPos(item["hwnd"], -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+        time.sleep(.15)
         # Intermediate native sizes exercise the real compositor, in addition
         # to the pointer-based system-resize gesture performed by the CDP gate.
         for index in range(8):
-            offset = (index if index < 4 else 7 - index) * 14
+            offset = -(index if index < 4 else 7 - index) * 14
             probe._place(args.pid, args.role, rect["left"], rect["top"], rect["width"] + offset, rect["height"] + offset)
             time.sleep(.055)
             args.action = "capture"
@@ -112,9 +150,11 @@ def main():
     parser.add_argument("--output-dir")
     parser.add_argument("--dpi", default="1,1.25,1.5")
     parser.add_argument("--cycles", type=int, default=20)
+    parser.add_argument("--window-only", action="store_true", help="Focus on theme/window regression; omit library drag")
+    parser.add_argument("--geometry-only", action="store_true", help="Avoid taking the desktop mouse; exercise native geometry and captures")
     parser.add_argument("--single-process", action="store_true", help="Diagnostic fallback for isolated desktops without a shared GPU context")
     parser.add_argument("--mock-source-reveal", action="store_true", help="Observe the backend source path without opening Explorer")
-    parser.add_argument("--action", choices=("capture", "flow", "snapshot", "place", "drag"))
+    parser.add_argument("--action", choices=("capture", "flow", "snapshot", "place", "drag", "drag-capture", "activate"))
     parser.add_argument("--pid", type=int)
     parser.add_argument("--role", default="main")
     parser.add_argument("--cycle", type=int, default=0)
@@ -155,6 +195,10 @@ def main():
             env["QTWEBENGINE_CHROMIUM_FLAGS"] += " --single-process"
             env["DD_QA_SINGLE_PROCESS"] = "1"
         env["QT_SCALE_FACTOR"] = str(scale / system_scale)
+        if args.window_only:
+            env["DD_QA_WINDOW_ONLY"] = "1"
+        if args.geometry_only:
+            env["DD_QA_GEOMETRY_ONLY"] = "1"
         if args.mock_source_reveal:
             hook_dir = scale_dir / "qa-hook"
             hook_dir.mkdir(exist_ok=True)

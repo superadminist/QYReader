@@ -467,8 +467,8 @@ class Stage4FloatingServiceTests(unittest.TestCase):
             _WindowRenderLifecycle._sync_web_surface(window)
         window._view.setGeometry.assert_called_once_with(QRect(0, 0, 1200, 700))
         window._view.update.assert_called_once()
-        window.update.assert_called_once()
-        window._page.runJavaScript.assert_called_once()
+        window.update.assert_not_called()
+        window._page.runJavaScript.assert_not_called()
 
     def test_source_reveal_uses_argument_array_and_rejects_missing_file(self):
         with tempfile.TemporaryDirectory(prefix="中文 路径 ") as temporary:

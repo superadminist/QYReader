@@ -574,17 +574,27 @@ input[type="range"] { height: 3px; accent-color: #6875d8; cursor: pointer; }
   color: var(--ui-text);
   color-scheme: light;
 }
-.prototype-stage[data-theme="白天"] { --ui-reader: #fff; --ui-canvas: #f0f2f6; --ui-page: #fff; }
-.prototype-stage[data-theme="护眼"] { --ui-reader: #f7faf3; --ui-canvas: #eaf0e8; --ui-page: #f4f8f2; }
+.prototype-stage[data-theme="白天"] {
+  --ui-page: #f5f6f8; --ui-panel: #f5f6f8; --ui-canvas: #f5f6f8; --ui-reader: #fff; --ui-raised: #fff;
+  --ui-text: #272c35; --ui-muted: #626c7b; --ui-border: #dde1e8; --ui-soft: #e9ecf2;
+  --ui-accent: #5361b8; --ui-control: #5e6bc4; --ui-selected: #e4e8f8; --ui-selected-text: #4553a2;
+}
+.prototype-stage[data-theme="护眼"] {
+  --ui-page: #eef2e9; --ui-panel: #eef2e9; --ui-canvas: #eef2e9; --ui-reader: #f7f9f2; --ui-raised: #f7f9f2;
+  --ui-text: #2d382e; --ui-muted: #616f60; --ui-border: #d8e0d2; --ui-soft: #e3e9dc;
+  --ui-accent: #4f7158; --ui-control: #55755c; --ui-selected: #dbe6d5; --ui-selected-text: #36543d;
+  --ui-highlight: #dfebc8; --ui-highlight-text: #2d382e; --ui-scrollbar: #a8b5a0;
+}
 .prototype-stage[data-theme="米黄"] {
-  --ui-reader: #fbf3e1; --ui-canvas: #ede5d5; --ui-page: #f6efdf; --ui-panel: #eee7d8; --ui-raised: #fff9ed;
-  --ui-text: #3d362b; --ui-muted: #786d5c; --ui-border: #ddd3bf; --ui-soft: #eee6d6;
-  --ui-accent: #876437; --ui-selected: #e9dbc1; --ui-selected-text: #674a2d; --ui-scrollbar: #b9ab90;
+  --ui-reader: #fbf5e8; --ui-canvas: #f2eadb; --ui-page: #f2eadb; --ui-panel: #f2eadb; --ui-raised: #fbf5e8;
+  --ui-text: #3d362b; --ui-muted: #756957; --ui-border: #dfd4bf; --ui-soft: #eae0cc;
+  --ui-accent: #80603a; --ui-control: #84633e; --ui-selected: #e6d8bc; --ui-selected-text: #634a2e; --ui-scrollbar: #b9ab90;
+  --ui-highlight: #efdfb5; --ui-highlight-text: #3d362b;
 }
 .prototype-stage.theme-dark {
-  --ui-page: #20232c; --ui-panel: #272c36; --ui-raised: #303642; --ui-reader: #252a34; --ui-canvas: #1c2028;
-  --ui-text: #e8ecf4; --ui-muted: #adb7c8; --ui-border: #454d5d; --ui-soft: #343b49;
-  --ui-accent: #a8b3ff; --ui-selected: #414b72; --ui-selected-text: #e0e5ff;
+  --ui-page: #252830; --ui-panel: #252830; --ui-raised: #2e323c; --ui-reader: #2c3039; --ui-canvas: #252830;
+  --ui-text: #e8ecf4; --ui-muted: #adb7c8; --ui-border: #3f4552; --ui-soft: #343a46;
+  --ui-accent: #adbaff; --ui-control: #5e6bc4; --ui-selected: #3e4867; --ui-selected-text: #e0e5ff;
   --ui-highlight: #635630; --ui-highlight-text: #fff4cf; --ui-scrollbar: #69768b;
   --ui-danger: #ffb4ad; --ui-danger-bg: #493239; --ui-warning: #f0cf92; --ui-warning-bg: #443a29;
   --ui-success: #a0dfc3; --ui-success-bg: #243e36;
@@ -606,9 +616,18 @@ input[type="range"] { height: 3px; accent-color: #6875d8; cursor: pointer; }
 .prototype-stage :is(.toc-list button:hover, .settings-nav button:hover, .icon-button:hover) { color: var(--ui-accent); background: var(--ui-soft); }
 .prototype-stage :is(.toc-list button.selected, .settings-nav button.selected, .theme-options button.selected, .color-setting button.selected, .reader-window-loading) { color: var(--ui-selected-text); background: var(--ui-selected); border-color: var(--ui-accent); }
 .prototype-stage .toc-list button.selected span { color: var(--ui-selected-text); }
-.prototype-stage .icon-button.active { color: #fff; background: #6875d9; }
+.prototype-stage .icon-button.active { color: #fff; background: var(--ui-control); }
 .prototype-stage .floating-toggle { color: var(--ui-selected-text); background: var(--ui-selected); }
-.prototype-stage .floating-toggle.on { color: #fff; background: #6975d6; }
+.prototype-stage :is(.brand-mark, .avatar, .play-button, .primary-button, .floating-toggle.on) { color: #fff; background: var(--ui-control); }
+.prototype-stage :is(.brand-mark, .avatar, .play-button, .primary-button, .icon-button.active, .floating-toggle.on) { box-shadow: 0 5px 14px color-mix(in srgb, var(--ui-control) 20%, transparent); }
+.prototype-stage :is(input[type="range"], input[type="checkbox"], progress) { accent-color: var(--ui-control); }
+.prototype-stage :is(.title-rule, .update-progress span) { background: var(--ui-control); }
+.prototype-stage .reader-start-marker { border-color: var(--ui-accent); }
+.prototype-stage .modal-icon { color: var(--ui-accent); background: var(--ui-selected); }
+.prototype-stage :is(input, textarea, select):focus { border-color: var(--ui-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-control) 12%, transparent); }
+.prototype-stage :is(.theme-options button.selected, .color-setting button.selected) { box-shadow: inset 0 0 0 1px var(--ui-accent); }
+.prototype-stage .reading-sheet { box-shadow: 0 4px 14px color-mix(in srgb, var(--ui-text) 5%, transparent); }
+.prototype-stage .player-bar { box-shadow: none; }
 .prototype-stage .reading-copy :is(mark, p.speaking) { color: var(--ui-highlight-text); background: var(--ui-highlight); }
 .prototype-stage :is(.chapter-index, .slider-field strong, .settings-nav button.selected) { color: var(--ui-accent); }
 .prototype-stage .release-notes-card pre { color: var(--ui-text); }
@@ -655,9 +674,10 @@ input[type="range"] { height: 3px; accent-color: #6875d8; cursor: pointer; }
 .native-floating-surface[data-resizing="true"],
 .native-floating-surface[data-resizing="true"] :is(.floating-dragbar, .floating-controls, .floating-resize-control, .floating-lyric-layer),
 .prototype-stage[data-resizing="true"] .mac-window { transition: none; animation: none; }
-.native-floating-surface { clip-path: inset(0 round var(--floating-window-radius)); }
-.desktop-host[data-window-mode="normal"] .mac-window { clip-path: inset(0 round var(--main-window-radius)); }
-.desktop-host[data-window-mode="maximized"] .mac-window, .desktop-host[data-window-mode="fullscreen"] .mac-window { clip-path: none; }
+/* border-radius + overflow clips once, without a second full-window clip-path layer. */
+.desktop-host .mac-window { box-shadow: none; }
+.desktop-host :is(.format-badge, .floating-reader) { backdrop-filter: none; -webkit-backdrop-filter: none; }
+.native-floating-surface { backdrop-filter: none; -webkit-backdrop-filter: none; }
 @media (prefers-reduced-motion: reduce) { .book-drag-preview, .library-sort-control button { transition: none; } }
 
 @media (max-width: 1120px) {

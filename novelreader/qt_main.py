@@ -7,6 +7,9 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Must precede QApplication and the first QWebEngine/QQuick surface.
+    from .qt_rendering import configure_rendering
+    configure_rendering()
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox
         from .paths import ensure_data_dir

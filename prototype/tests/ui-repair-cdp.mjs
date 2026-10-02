@@ -7,6 +7,8 @@ const env = process.env;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const output = env.DD_QA_SCREENSHOT_DIR;
 const count = Number(env.DD_QA_CYCLES || 20);
+const windowOnly = env.DD_QA_WINDOW_ONLY === "1";
+const geometryOnly = env.DD_QA_GEOMETRY_ONLY === "1";
 const assert = (value, message) => { if (!value) throw new Error(message); };
 const clients = [];
 const evidence = { scaleFactor: Number(env.DD_QA_SCALE_FACTOR), systemScale: Number(env.DD_QA_SYSTEM_SCALE), qtMultiplier: Number(env.DD_QA_QT_MULTIPLIER), cycles: count, themes: [], frames: [], windowChecks: [], pointerResize: [], limitations: [] };
@@ -57,7 +59,8 @@ async function native(client, method, argument) {
   return result?.data;
 }
 function probe(action = "snapshot", args = []) {
-  const result = spawnSync(env.DD_QA_PYTHON, [env.DD_QA_UI_PROBE, "--action", action, "--pid", env.DD_QA_HOST_PID, ...args], { encoding: "utf8", windowsHide: true });
+  const runtime = action === "drag-capture" ? env.DD_QA_CAPTURE_PYTHON : env.DD_QA_PYTHON;
+  const result = spawnSync(runtime, [env.DD_QA_UI_PROBE, "--action", action, "--pid", env.DD_QA_HOST_PID, "--output-dir", output, ...args], { encoding: "utf8", windowsHide: true });
   assert(result.status === 0, `Native probe failed: ${result.stderr}`);
   return JSON.parse(result.stdout);
 }
@@ -99,8 +102,12 @@ try {
   assert(await evaluate(main, `document.querySelector('.prototype-stage').dataset.theme === ${JSON.stringify(initialState.preferences.theme)}`), "Persisted theme was not restored on startup");
   evidence.startup = { order: initialOrder, sortMode: initialLibrary.sortMode, theme: initialState.preferences.theme };
   assert(!await evaluate(main, "Boolean(document.querySelector('vite-error-overlay'))"), "Framework error overlay");
-  probe("place", ["--role", "main", "--x", "60", "--y", "60", "--width", "1180", "--height", "1000"]);
+  const work = probe().monitors.find(item => item.primary).work;
+  const testWidth = Math.min(work.width - 40, Math.max(1180, Math.ceil(1000 * evidence.scaleFactor)));
+  const testHeight = Math.min(work.height - 30, Math.max(860, Math.ceil(625 * evidence.scaleFactor)));
+  probe("place", ["--role", "main", "--x", String(work.left + 10), "--y", String(work.top + 10), "--width", String(testWidth), "--height", String(testHeight)]);
   await sleep(300);
+  if (!windowOnly) {
   await evaluate(main, "[...document.querySelectorAll('.library-sort-control button')].find(node=>node.innerText==='自定义排序').click()");
   await poll(() => evaluate(main, "Boolean(document.querySelector('.book-grid.sortable'))"), "Manual sort not enabled");
   await sleep(250); // Allow card FLIP animations after the mode switch to settle.
@@ -114,12 +121,14 @@ try {
   assert(points.to.y < evidence.libraryViewport.height - 8, "Cross-row target is outside the visible viewport; enlarge the test window before pointer input");
   assert(points.from.y > 54, "Drag source is clipped above the native title bar");
   await screenshot(main, "library-before-drag.png");
-  await main.call("Input.dispatchMouseEvent", { type: "mousePressed", ...points.from, button: "left", clickCount: 1 });
-  for (let step = 1; step <= 12; step++) {
-    await main.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: points.from.x + (points.to.x - points.from.x) * step / 12, y: points.from.y + (points.to.y - points.from.y) * step / 12, button: "left", buttons: 1 });
-    await sleep(35);
-  }
-  await main.call("Input.dispatchMouseEvent", { type: "mouseReleased", ...points.to, button: "left", clickCount: 1 });
+  probe("activate", ["--role", "main"]);
+  await main.call("Page.bringToFront");
+  await evaluate(main, "window.__qaDragEvents=[]; for(const type of ['pointerdown','pointermove','pointerup','pointercancel','blur']) window.addEventListener(type,event=>window.__qaDragEvents.push({type,x:event.clientX,y:event.clientY,buttons:event.buttons,target:event.target.closest?.('[data-book-id]')?.dataset.bookId,focus:document.hasFocus()}),true)");
+  // Qt also supplies native mouse moves. Drive one real held gesture rather
+  // than mixing CDP's virtual button state with the desktop's released mouse.
+  const libraryDrag = probe("drag-capture", ["--role","main","--cycle","-1","--from-x",String(Math.round(points.from.x*evidence.scaleFactor)),"--from-y",String(Math.round(points.from.y*evidence.scaleFactor)),"--dx",String(Math.round((points.to.x-points.from.x)*evidence.scaleFactor)),"--dy",String(Math.round((points.to.y-points.from.y)*evidence.scaleFactor))]);
+  evidence.frames.push(...libraryDrag.frames);
+  evidence.dragDebug = await evaluate(main, "({events:window.__qaDragEvents,ghost:!!document.querySelector('.book-drag-preview'),error:document.querySelector('.library-error')?.innerText,order:[...document.querySelectorAll('.book-card')].map(node=>node.dataset.bookId)})");
   const sorted = await poll(async () => { const state = await native(main, "getLibraryState"); return state.books.map(book=>book.id).join() !== before.join() ? state : null; }, "Cross-row drag did not persist");
   evidence.sort = { before, after: sorted.books.map(book=>book.id), target: points.target };
   await screenshot(main, "library-manual-order.png");
@@ -128,11 +137,15 @@ try {
   await screenshot(main, "library-context-menu.png");
   await main.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
   await main.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  } else {
+    evidence.limitations.push("Window-focused regression: library drag/source actions omitted; covered separately by the two-cycle interaction run.");
+  }
   await evaluate(main, "document.querySelector('.book-open').click()");
   await poll(() => evaluate(main, "Boolean(document.querySelector('.native-reader .reading-copy'))"), "Reader not ready");
   for (const theme of ["白天", "护眼", "米黄", "夜间"]) {
     await native(main, "updateAppPreferences", JSON.stringify({ patch: { theme } }));
     await poll(() => evaluate(main, `document.querySelector('.prototype-stage').dataset.theme === ${JSON.stringify(theme)}`), "Theme did not update");
+    await sleep(300); // Capture settled colors rather than the 180ms button transition.
     const colors = await evaluate(main, `(() => { const selectors=['.player-bar','.toolbar-center','.reading-sheet h1','.reading-copy','.toc-list .selected']; return Object.fromEntries(selectors.map(selector=>{const node=document.querySelector(selector); const style=getComputedStyle(node);return [selector,{color:style.color,background:style.backgroundColor}]})); })()`);
     if (theme === "夜间") {
       for (const selector of [".player-bar", ".toolbar-center"]) {
@@ -143,9 +156,20 @@ try {
       assert(Math.min(...heading.slice(0,3)) > 120, "Chapter heading too dark in night mode");
     }
     evidence.themes.push({ theme, colors });
+    const palette = await evaluate(main, `(() => { const panels=['.mac-titlebar','.rail','.reader-toolbar','.toc-panel','.player-bar']; return {panels:panels.map(selector=>getComputedStyle(document.querySelector(selector)).backgroundColor), canvas:getComputedStyle(document.querySelector('.reader-page')).backgroundColor, active:getComputedStyle(document.querySelector('.rail .icon-button.active')).backgroundColor, play:getComputedStyle(document.querySelector('.play-button')).backgroundColor}; })()`);
+    assert(palette.panels.every(color => color === palette.canvas), `Theme chassis colors differ: ${JSON.stringify(palette)}`);
+    assert(palette.active === palette.play, `Theme accent colors differ: ${JSON.stringify(palette)}`);
+    evidence.themes.at(-1).palette = palette;
     await screenshot(main, `reader-theme-${theme}.png`);
   }
   for (let cycle = 0; cycle < count; cycle++) {
+    if (!geometryOnly) {
+    const resizePoint = await evaluate(main, "(()=>{const rect=document.querySelector('.window-resize-handle.bottomRight').getBoundingClientRect();return {x:(rect.left+rect.width/2)*devicePixelRatio,y:(rect.top+rect.height/2)*devicePixelRatio}})()");
+    const mainDelta = cycle % 2 ? 10 : -10;
+    const mainResize = probe("drag-capture", ["--role", "main", "--cycle", String(cycle), "--from-x", String(Math.round(resizePoint.x)), "--from-y", String(Math.round(resizePoint.y)), "--dx", String(mainDelta), "--dy", String(mainDelta)]);
+    evidence.frames.push(...mainResize.frames);
+    evidence.pointerResize.push({role:"main", cycle, mode:mainResize.dragMode, scale:evidence.scaleFactor});
+    }
     visual("main", cycle, true);
     await viewport(main, "main");
     await native(main, "toggleMaximizeWindow");
@@ -162,15 +186,20 @@ try {
     const floating = await attach(true);
     await poll(() => evaluate(floating, "Boolean(document.querySelector('.native-floating-surface'))"), "Floating root missing");
     if (cycle === 0) { await sleep(350); await screenshot(floating, "floating-initial.png"); }
+    const floatingRect = probe().windows.find(item=>item.role==="floating").rect;
+    probe("place", ["--role","floating","--x",String(work.left+30),"--y",String(work.top+80),"--width",String(floatingRect.width),"--height",String(floatingRect.height)]);
     visual("floating", cycle, true);
     await viewport(floating, "floating");
+    if (!geometryOnly) {
     await floating.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 160, y: 120 });
     await sleep(220);
     const point = await evaluate(floating, "(()=>{const rect=document.querySelector('.floating-resize-control').getBoundingClientRect();return {x:(rect.left+rect.width/2)*devicePixelRatio,y:(rect.top+rect.height/2)*devicePixelRatio}})()");
     const delta = cycle % 2 ? -35 : 35;
-    const snapshot = probe("drag", ["--role", "floating", "--from-x", String(Math.round(point.x)), "--from-y", String(Math.round(point.y)), "--dx", String(delta), "--dy", String(delta)]);
-    evidence.pointerResize.push({ cycle, mode: snapshot.dragMode, scale: evidence.scaleFactor });
+    const snapshot = probe("drag-capture", ["--role", "floating", "--cycle", String(cycle), "--from-x", String(Math.round(point.x)), "--from-y", String(Math.round(point.y)), "--dx", String(delta), "--dy", String(delta)]);
+    evidence.frames.push(...snapshot.frames);
+    evidence.pointerResize.push({ role:"floating", cycle, mode: snapshot.dragMode, scale: evidence.scaleFactor });
     await viewport(floating, "floating");
+    }
     await native(main, "returnToMainWindow");
     floating.socket.close();
     await sleep(120);
@@ -182,7 +211,7 @@ try {
   const returned = await native(main, "getLibraryState");
   const returnedOrder = await evaluate(main, "[...document.querySelectorAll('.book-card')].map(node=>node.dataset.bookId)");
   assert(returnedOrder.join() === returned.books.map(book=>book.id).join(), "Returning from reader displayed stale library order");
-  assert(returned.sortMode === "manual", "Reading changed manual sort mode");
+  assert(returned.sortMode === (windowOnly ? initialLibrary.sortMode : "manual"), "Reading changed sort mode");
   evidence.returnedLibrary = { order: returnedOrder, sortMode: returned.sortMode };
   if (env.DD_QA_REVEAL_LOG) {
     await evaluate(main, "document.querySelector('.book-more').click()");
@@ -193,7 +222,8 @@ try {
   }
   evidence.consoleErrors = clients.flatMap(client=>client.events.filter(event=>event.method==="Runtime.exceptionThrown" || event.method==="Runtime.consoleAPICalled" && event.params?.type==="error"));
   evidence.nativeInteractions = await evaluate(main, "window.__qaInteractions");
-  if (evidence.pointerResize.every(item=>item.mode!=="mouse")) evidence.limitations.push("Native pointer unavailable: size changes exercised SetWindowPos fallback; mouse-following smoothness requires an interactive desktop.");
+  if (geometryOnly) evidence.limitations.push("Desktop mouse not used: consecutive size frames use native SetWindowPos; live mouse evidence is from the separate two-cycle run.");
+  else if (evidence.pointerResize.every(item=>item.mode!=="mouse")) evidence.limitations.push("Native pointer unavailable: size changes exercised SetWindowPos fallback; mouse-following smoothness requires an interactive desktop.");
   assert(evidence.consoleErrors.length === 0, `Runtime errors: ${JSON.stringify(evidence.consoleErrors)}`);
   if (!evidence.frames.some(frame=>frame.available)) evidence.limitations.push("Desktop screen capture is unavailable; CDP images alone do not prove absence of half-screen compositor glitches.");
   evidence.passed = true;

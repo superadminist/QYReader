@@ -27,6 +27,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenu, QMe
 
 from .book_loader import SUPPORTED_EXTS
 from .library_service import LibraryQueryService
+from .qt_corners import RoundedWebEngineView
 from .playback_service import PlaybackService
 from .qt_bridge import DesktopBridge
 from .reader_service import ReaderService
@@ -128,7 +129,7 @@ def _inject_qwebchannel_script(page: QWebEnginePage) -> None:
 
 
 def _configure_main_web_view(view: QWebEngineView, page: QWebEnginePage) -> None:
-    """Let CSS paint the main window's anti-aliased outer corners."""
+    """Keep the page transparent for CSS and the native alpha corner guard."""
     view.setObjectName("mainWebView")
     page.setBackgroundColor(QColor(0, 0, 0, 0))
     view.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -173,7 +174,7 @@ def _apply_window_corners(
     if getattr(window, "_dd_corner_state", None) == corner_state:
         return
     window._dd_corner_state = corner_state
-    # CSS owns antialiasing and clipping at every size; never create a binary
+    # CSS and the native alpha guard clip at every size; never create a binary
     # native region that becomes stale halfway through a system resize.
     window.clearMask()
     _set_windows_corner_preference(window, rounded)
@@ -241,9 +242,12 @@ class _WindowRenderLifecycle:
         rect = self.contentsRect()
         if self._view.geometry() != rect:
             self._view.setGeometry(rect)
+        # Paint only the web view. Invalidating the translucent parent too
+        # clears its entire backing store before Chromium supplies the next
+        # frame; that can expose the desktop during ordinary interaction.
         self._view.update()
-        self.update()
-        self._page.runJavaScript("window.dispatchEvent(new Event('resize'))")
+        # Chromium sends resize once the real viewport has changed. A synthetic
+        # resize here runs against the previous viewport and duplicates layout.
         if os.environ.get("DD_QA_TRACE"):
             _qa_trace(f"window-render:{self._surface}:client={rect}:view={self._view.geometry()}:state={self.windowState()}")
             self._page.runJavaScript(
@@ -268,7 +272,7 @@ class FloatingReaderWindow(_WindowRenderLifecycle, QMainWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMinimumSize(360, 220)
 
-        self._view = QWebEngineView(self)
+        self._view = RoundedWebEngineView(self, "floating")
         self._page = QWebEnginePage(profile, self._view)
         self._view.setPage(self._page)
         _configure_floating_web_view(self._view, self._page)
@@ -423,7 +427,7 @@ class DesktopWindow(_WindowRenderLifecycle, QMainWindow):
 
         # Create the view first so its page is destroyed before the custom
         # profile owned by this window.
-        self._view = QWebEngineView(self)
+        self._view = RoundedWebEngineView(self, "main")
         _qa_trace("desktop-window:view-created")
         self._profile = QWebEngineProfile(self)
         self._fullscreen_restore_maximized = False
