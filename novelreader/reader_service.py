@@ -9,6 +9,7 @@ import math
 import os
 import threading
 import uuid
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -73,6 +74,7 @@ class _ReaderSession:
     position: dict[str, Any]
     settings: dict[str, Any]
     block_cache: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    anchor_hashes: dict[int, str] = field(default_factory=dict)
     searches: dict[str, _SearchState] = field(default_factory=dict)
 
 
@@ -219,6 +221,9 @@ class ReaderService:
             if not storage.get_book(book_id):
                 raise ReaderServiceError("BOOK_NOT_FOUND", "内容库中不存在该书籍。")
             try:
+                from .feature_store import advance_status, backup_library
+                backup_library(self.library_path)
+                advance_status(storage.get_book(book_id), position["progressPercent"])
                 storage.update_reading_state(book_id, {
                     "chapter_idx": position["chapterIndex"],
                     "char_offset": position["charOffset"],
@@ -374,12 +379,12 @@ class ReaderService:
                 self._validate_library()
                 storage = Storage(os.fspath(self.library_path))
                 bookmarks = storage.get_bookmarks(session.book_id)
-            items = [self._bookmark_data(session, bookmark) for bookmark in bookmarks]
-            end = min(len(items), offset + BOOKMARK_PAGE_SIZE)
+            end = min(len(bookmarks), offset + BOOKMARK_PAGE_SIZE)
+            items = [self._bookmark_data(session, bookmark) for bookmark in bookmarks[offset:end]]
             return {
-                "total": len(items),
-                "nextCursor": str(end) if end < len(items) else "",
-                "items": items[offset:end],
+                "total": len(bookmarks),
+                "nextCursor": str(end) if end < len(bookmarks) else "",
+                "items": items,
             }
 
     def add_bookmark(
@@ -389,6 +394,8 @@ class ReaderService:
         start_offset: int,
         end_offset: int,
         note: str,
+        kind: str = "bookmark",
+        color: str = "yellow",
     ) -> dict[str, Any]:
         with self._session_lock:
             session = self._require_session(session_id)
@@ -401,13 +408,18 @@ class ReaderService:
             selected_text = content[start:end].strip()
             if not selected_text:
                 raise ReaderServiceError("BOOKMARK_EMPTY", "选中的内容为空，无法添加书签。")
+            if kind not in {"bookmark", "annotation"} or color not in {"yellow", "green", "blue", "pink"}:
+                raise ReaderServiceError("INVALID_REQUEST", "笔记类型或颜色无效。")
+            from .annotations import make_anchor
             default_note = selected_text[:30] + ("…" if len(selected_text) > 30 else "")
             bookmark = {
                 "chapter_idx": chapter_index,
                 "offset": start,
                 "offset_end": end,
                 "text": selected_text,
-                "note": str(note or "").strip() or default_note,
+                "note": str(note or "").strip() if kind == "annotation" else str(note or "").strip() or default_note,
+                "kind": kind, "color": color,
+                "anchor": make_anchor(content, start, end),
             }
             with library_write_lock(self.library_path):
                 self._validate_library()
@@ -415,7 +427,12 @@ class ReaderService:
                 if not storage.get_book(session.book_id):
                     raise ReaderServiceError("BOOK_NOT_FOUND", "内容库中不存在该书籍。")
                 try:
-                    bookmark_id = storage.add_bookmark(session.book_id, bookmark)
+                    from .feature_store import save_library
+                    bookmark["id"] = uuid.uuid4().hex
+                    bookmark["created_at"] = time.time()
+                    storage.get_book(session.book_id).setdefault("bookmarks", []).append(bookmark)
+                    save_library(self.library_path, storage.data)
+                    bookmark_id = bookmark["id"]
                 except Exception as exc:
                     raise ReaderServiceError(
                         "LIBRARY_WRITE_FAILED",
@@ -425,6 +442,43 @@ class ReaderService:
             if not bookmark_id:
                 raise ReaderServiceError("BOOK_NOT_FOUND", "内容库中不存在该书籍。")
             return self._bookmark_data(session, bookmark)
+
+    def update_bookmark(self, session_id, bookmark_id, patch):
+        from .feature_store import read_library, save_library
+        if not isinstance(patch, dict) or not patch or set(patch) - {"note", "color"}:
+            raise ReaderServiceError("INVALID_REQUEST", "笔记编辑参数无效。")
+        if "color" in patch and patch["color"] not in {"yellow", "green", "blue", "pink"}:
+            raise ReaderServiceError("INVALID_REQUEST", "划线颜色无效。")
+        if "note" in patch and (not isinstance(patch["note"], str) or len(patch["note"]) > 10000):
+            raise ReaderServiceError("INVALID_REQUEST", "备注最长10000字。")
+        with self._session_lock, library_write_lock(self.library_path):
+            session = self._require_session(session_id)
+            data = read_library(self.library_path)
+            book = data["books"].get(session.book_id)
+            if not isinstance(book, dict):
+                raise ReaderServiceError("BOOK_NOT_FOUND", "书籍已移除。")
+            bookmark = next((x for x in book.get("bookmarks", []) if x.get("id") == bookmark_id), None)
+            if bookmark is None:
+                raise ReaderServiceError("BOOKMARK_NOT_FOUND", "笔记已删除。")
+            bookmark.update(patch)
+            bookmark["updated_at"] = time.time()
+            save_library(self.library_path, data)
+            return self._bookmark_data(session, bookmark)
+
+    def export_bookmarks(self, session_id, format):
+        from .annotations import export_notes
+        if format not in {"md", "txt"}:
+            raise ReaderServiceError("INVALID_REQUEST", "请选择Markdown或TXT。")
+        with self._session_lock:
+            session = self._require_session(session_id)
+            items, cursor = [], ""
+            while True:
+                page = self.list_bookmarks(session_id, cursor)
+                items.extend(page["items"])
+                cursor = page["nextCursor"]
+                if not cursor:
+                    break
+            return export_notes(session.content.title, items, format)
 
     def remove_bookmark(self, session_id: str, bookmark_id: str) -> dict[str, Any]:
         safe_id = str(bookmark_id or "")
@@ -785,6 +839,10 @@ class ReaderService:
             len(session.content.chapters) - 1,
         )
         chapter = session.content.chapters[chapter_index]
+        from .annotations import locate, fingerprint
+        if chapter_index not in session.anchor_hashes:
+            session.anchor_hashes[chapter_index] = fingerprint(chapter.content)
+        location = locate(bookmark, chapter.content, session.anchor_hashes[chapter_index])
         start = ReaderService._clamp_integer(bookmark.get("offset", 0), 0, len(chapter.content))
         end = ReaderService._clamp_integer(
             bookmark.get("offset_end", start),
@@ -796,11 +854,15 @@ class ReaderService:
             "id": str(bookmark.get("id") or ""),
             "chapterIndex": chapter_index,
             "chapterTitle": str(chapter.title or f"第 {chapter_index + 1} 章"),
-            "startOffset": start,
-            "endOffset": end,
+            "startOffset": location[0] if location else start,
+            "endOffset": location[1] if location else end,
             "text": str(bookmark.get("text") or ""),
             "note": str(bookmark.get("note") or ""),
             "createdAt": created_at or 0.0,
+            "kind": bookmark.get("kind", "bookmark"),
+            "color": bookmark.get("color", "yellow"),
+            "updatedAt": bookmark.get("updated_at", created_at or 0.0),
+            "locationValid": bool(location) if bookmark.get("anchor") else True,
         }
 
     @staticmethod

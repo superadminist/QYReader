@@ -59,3 +59,13 @@ export function readerPositionFromPointer(root, event, chapterIndex) {
     : rangeAtPoint(documentObject, event.clientX, event.clientY);
   return readerPositionFromRange(root, range, chapterIndex);
 }
+
+export function readerSelectionFromRange(root, range, chapterIndex) {
+  if (!range || range.collapsed || !readerBlockForNode(root, range.startContainer) || !readerBlockForNode(root, range.endContainer)) return null;
+  const endRange = range.cloneRange();
+  endRange.collapse(false);
+  const start = readerPositionFromRange(root, range, chapterIndex);
+  const end = readerPositionFromRange(root, endRange, chapterIndex);
+  if (!start || !end || start.charOffset >= end.charOffset) return null;
+  return { chapterIndex, startOffset: start.charOffset, endOffset: end.charOffset, text: range.toString() };
+}

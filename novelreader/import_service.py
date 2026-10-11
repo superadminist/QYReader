@@ -428,6 +428,14 @@ class LibraryImportService:
                     if book_id not in order:
                         order.append(book_id)
                     current_storage.data["settings"]["library_manual_order"] = order
+                from .feature_store import backup_library
+                previous = current_storage.get_book(book_id)
+                if isinstance(previous, dict):
+                    merged = dict(previous)
+                    merged.update({key: value for key, value in metadata.items()
+                                   if key not in {"progress", "added_at", "last_read_at"}})
+                    metadata = merged
+                backup_library(self.library_path)
                 current_storage.add_book(metadata)
             except Exception as exc:
                 raise ImportServiceError(

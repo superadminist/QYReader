@@ -199,7 +199,8 @@ class Storage:
         b = self.data["books"].get(bid)
         if not b:
             return
-        b["progress"] = progress
+        previous = b.get("progress")
+        b["progress"] = {**(previous if isinstance(previous, dict) else {}), **progress}
         b["last_read_at"] = time.time()
         self.data["settings"]["last_book"] = bid
         self.save()
@@ -247,7 +248,7 @@ class Storage:
         bms = b.get("bookmarks")
         if not isinstance(bms, list):
             return
-        b["bookmarks"] = [x for x in bms if x.get("id") != bm_id]
+        b["bookmarks"] = [x for x in bms if not isinstance(x, dict) or str(x.get("id", "")) != str(bm_id)]
         self.save()
 
     # ---------- 缓存大小持久化（避免每次刷新书架遍历文件系统） ----------

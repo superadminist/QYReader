@@ -32,6 +32,10 @@ from .software_update import (
     is_newer_version,
 )
 from .tts_engine import SpeechController
+from .feature_store import FeatureError, OrganizationService
+from .kokoro_service import KokoroService
+from .activity_service import ActivityService
+from pathlib import Path
 
 
 SCHEMA_VERSION = 2
@@ -107,6 +111,7 @@ class DesktopBridge(QObject):
     appPreferencesChanged = Signal(str)
     speechPreferencesChanged = Signal(str)
     softwareUpdateChanged = Signal(str)
+    featuresChanged = Signal(str)
 
     def __init__(
         self,
@@ -127,6 +132,20 @@ class DesktopBridge(QObject):
         self._importer = importer or LibraryImportService(library_path)
         self._reader = reader or ReaderService(library_path, deferred_progress=True)
         self._playback = playback or PlaybackService(SpeechController())
+        from .paths import default_data_dir
+        self._feature_root = Path(library_path).parent if library_path else default_data_dir()
+        self._organization = OrganizationService(library_path or self._feature_root / "library.json")
+        self._feature_events = queue.Queue()
+        self._kokoro = KokoroService(self._feature_root, lambda state: self._feature_events.put(("model", state)))
+        attach_kokoro = getattr(getattr(self._playback, "speech_controller", None), "set_kokoro_service", None)
+        if callable(attach_kokoro):
+            attach_kokoro(self._kokoro)
+        self._activity = None
+        self._active_status_book = ""
+        self._feature_timer = QTimer(self)
+        self._feature_timer.setInterval(250)
+        self._feature_timer.timeout.connect(self._drain_features)
+        self._feature_timer.start()
         self._app = app_preferences or AppPreferencesService(library_path)
         self._software_updates = software_updates or SoftwareUpdateService()
         self._floating = FloatingReaderService(self._playback, library_path)
@@ -632,12 +651,14 @@ class DesktopBridge(QObject):
         if request is None:
             return self._error_response(empty, "INVALID_REQUEST", "书签请求格式不正确。")
         try:
+            options = {"kind": request["kind"], "color": request.get("color", "yellow")} if "kind" in request else {}
             return self._ok_response(self._reader.add_bookmark(
                 request.get("sessionId"),
                 request.get("chapterIndex"),
                 request.get("startOffset"),
                 request.get("endOffset"),
                 request.get("note", ""),
+                **options,
             ))
         except Exception as exc:
             return self._reader_error_response(empty, exc)
@@ -1191,6 +1212,127 @@ class DesktopBridge(QObject):
         self._software_update_thread = None
         self._queue_software_update_state(state)
 
+    @Slot(str, result=str)
+    def readerFeatureAction(self, request_json):
+        request = self._request_object(request_json)
+        if not request:
+            return self._error_response({}, "INVALID_REQUEST", "请求格式无效。")
+        action = request.get("action")
+        try:
+            from PySide6.QtWidgets import QFileDialog
+            if action == "modelState":
+                data = {**self._kokoro.snapshot(), "playback": self._playback.snapshot()}
+            elif action in {"modelDownload", "modelRetry"}:
+                if self._playback.snapshot()["requestedBackend"] == "kokoro" and self._playback.snapshot()["status"] in {"playing", "paused"}:
+                    raise FeatureError("MODEL_BUSY", "请先停止Kokoro朗读，再安装模型。")
+                data = self._kokoro.start()
+            elif action == "modelCancel":
+                data = self._kokoro.cancel()
+            elif action == "modelImport":
+                snapshot = self._playback.snapshot()
+                if snapshot["status"] == "playing" or snapshot["requestedBackend"] == "kokoro" and snapshot["status"] == "paused":
+                    raise FeatureError("MODEL_BUSY", "请先停止朗读，再导入模型。")
+                path, _ = QFileDialog.getOpenFileName(self._window, "导入官方Kokoro v1.0 INT8模型包", "", "模型包 (*.tar.bz2)")
+                data = self._kokoro.start(path) if path else self._kokoro.snapshot()
+            elif action == "modelDirectory":
+                if self._playback.snapshot()["status"] in {"playing", "paused"}:
+                    raise FeatureError("MODEL_BUSY", "请先停止朗读，再选择模型目录。")
+                path = QFileDialog.getExistingDirectory(self._window, "选择离线模型存放目录")
+                data = self._kokoro.set_directory(path) if path else self._kokoro.snapshot()
+            elif action == "previewVoice":
+                voice = request.get("voiceId")
+                if voice not in {x["id"] for x in self._kokoro.voices()} or self._kokoro.snapshot()["status"] != "ready":
+                    raise FeatureError("VOICE_NOT_READY", "请先安装离线音色包。")
+                data = self._playback.preview("你好，这是启远阅读的离线音色试听。文字在这里，声音陪伴你。", voice)
+            elif action == "organizationState":
+                data = self._organization.state()
+            elif action == "organizationUpdate":
+                data = self._organization.update(request.get("request", {}))
+                self._active_status_book = ""
+                self.featuresChanged.emit(_json({"schemaVersion": SCHEMA_VERSION, "kind": "organization", "data": data}))
+            elif action == "updateNote":
+                data = self._reader.update_bookmark(request.get("sessionId"), request.get("bookmarkId"), request.get("patch"))
+            elif action == "exportNotes":
+                format = request.get("format")
+                text = self._reader.export_bookmarks(request.get("sessionId"), format)
+                path, _ = QFileDialog.getSaveFileName(self._window, "导出书签与笔记", "阅读笔记." + format, "Markdown (*.md)" if format == "md" else "文本 (*.txt)")
+                if path:
+                    from .feature_store import read_library
+                    library_path = self._organization.path
+                    payload = read_library(library_path)
+                    protected = {library_path.resolve()}
+                    for book in payload["books"].values():
+                        if isinstance(book, dict):
+                            protected.update(Path(book[key]).resolve() for key in ("path", "source_bak") if isinstance(book.get(key), str) and book[key])
+                    target = Path(path).resolve()
+                    if target in protected:
+                        raise FeatureError("EXPORT_SOURCE_PROTECTED", "导出不能覆盖书架或原文件，请另选文件名。")
+                    temporary = target.with_name(target.name + "." + uuid.uuid4().hex + ".tmp")
+                    try:
+                        temporary.write_text(text, encoding="utf-8")
+                        os.replace(temporary, target)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+                data = {"saved": bool(path), "cancelled": not bool(path)}
+            elif action in {"activity", "statistics"}:
+                if self._activity is None:
+                    self._activity = ActivityService(self._feature_root / "reading_stats.sqlite3")
+                if action == "activity":
+                    self._activity.report(request.get("surface"), request.get("sessionId"), request.get("visible"), request.get("inputSequence"))
+                    data = {"accepted": True}
+                else:
+                    self._tick_activity()
+                    data = self._activity.state()
+            else:
+                raise FeatureError("INVALID_REQUEST", "功能请求无效。")
+            return self._ok_response(data)
+        except Exception as exc:
+            return self._error_response({}, getattr(exc, "code", "FEATURE_FAILED"), getattr(exc, "user_message", "操作失败：" + str(exc)), getattr(exc, "retryable", True))
+
+    def _tick_activity(self):
+        if self._activity is None:
+            return
+        active = None
+        def foreground(window):
+            if not getattr(window, "isActiveWindow", lambda: False)() or not getattr(window, "isVisible", lambda: False)():
+                return False
+            if os.name == "nt" and hasattr(window, "winId"):
+                import ctypes
+                from ctypes import wintypes
+                get_foreground = ctypes.windll.user32.GetForegroundWindow
+                get_foreground.restype = wintypes.HWND
+                return get_foreground() == int(window.winId())
+            return True
+        if foreground(self._window):
+            active = "main"
+        floating = getattr(self._window, "_floating_window", None)
+        if floating is not None and foreground(floating):
+            active = "floating"
+        snapshot = self._playback.snapshot()
+        speaking = getattr(self._playback.speech_controller, "is_audible", lambda: False)()
+        reading = self._activity.tick(active, None, snapshot.get("purpose", "book"), self._playback.session_identity().get("bookId", ""))
+        if snapshot.get("purpose", "book") == "book" and (speaking or reading):
+            book_id = self._playback.session_identity().get("bookId", "")
+            if book_id and book_id != self._active_status_book:
+                self._organization.active(book_id)
+                self._active_status_book = book_id
+
+    def _drain_features(self):
+        if self._shutdown:
+            return
+        while True:
+            try:
+                kind, state = self._feature_events.get_nowait()
+            except queue.Empty:
+                break
+            self.featuresChanged.emit(_json({"schemaVersion": SCHEMA_VERSION, "kind": kind, "data": state}))
+            if state["status"] in {"ready", "error", "cancelled"}:
+                self.speechPreferencesChanged.emit(_json({"schemaVersion": SCHEMA_VERSION, "state": self._speech_state()}))
+        try:
+            self._tick_activity()
+        except Exception as exc:
+            self._emit_error(getattr(exc, "code", "STATISTICS_FAILED"), getattr(exc, "user_message", "统计保存失败。"))
+
     def shutdownImports(self) -> None:
         if self._import_cancel is not None:
             self._import_cancel.set()
@@ -1200,6 +1342,10 @@ class DesktopBridge(QObject):
         if self._shutdown:
             return
         self._shutdown = True
+        self._feature_timer.stop()
+        self._kokoro.close()
+        if self._activity is not None:
+            self._activity.close()
         self.shutdownImports()
         if self._search_cancel is not None:
             self._search_cancel.set()
@@ -1232,6 +1378,9 @@ class DesktopBridge(QObject):
                     self._emit_error(exc.code, exc.user_message)
 
     def _flush_reader_progress(self, *, wait=True) -> None:
+        cancel_preview = getattr(self._playback, "cancel_preview", None)
+        if callable(cancel_preview):
+            cancel_preview()
         flush = getattr(self._reader, "flush_progress", None)
         if not callable(flush):
             return
@@ -1386,7 +1535,14 @@ class DesktopBridge(QObject):
         except RuntimeError:
             return
         for event in events:
-            if event.get("reason") in {"sentenceDone", "finished"}:
+            if self._activity is not None:
+                transition = event.get("audioTransition")
+                if transition:
+                    enabled = transition["active"] and event.get("playback", {}).get("purpose", "book") == "book"
+                    self._activity.record_audio(enabled, transition["at"])
+                elif event.get("reason") == "state" and event.get("playback", {}).get("phase") != "speaking" and self._activity.flags[1]:
+                    self._activity.record_audio(False, time.monotonic())
+            if event.get("playback", {}).get("purpose", "book") != "preview" and event.get("reason") in {"sentenceDone", "finished"}:
                 position = event.get("playback", {}).get("position", {})
                 try:
                     self._reader.update_position(
@@ -1494,6 +1650,9 @@ class DesktopBridge(QObject):
         )
 
     def _apply_speech_settings(self, settings: dict[str, Any]) -> None:
+        cancel_preview = getattr(self._playback, "cancel_preview", None)
+        if callable(cancel_preview):
+            cancel_preview()
         speech = self._playback.speech_controller
         voice_id = settings.get("ttsVoiceId")
         speech.set_voice(str(voice_id or ""))
@@ -1531,7 +1690,7 @@ class DesktopBridge(QObject):
                 "ttsRate": int(settings.get("ttsRate", 200)),
                 "sentenceGapSeconds": float(settings.get("sentenceGapSeconds", 0.1)),
             },
-            "voices": [dict(option) for option in self._voice_options],
+            "voices": [dict(option) for option in self._voice_options] + self._kokoro.voices(),
             "loadingLocalVoices": self._local_voices_loading,
             "localVoiceError": self._local_voice_error,
         }

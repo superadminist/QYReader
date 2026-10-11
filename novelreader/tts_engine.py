@@ -27,6 +27,9 @@ import re
 import tempfile
 import threading
 import time
+import unicodedata
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 
 try:
     import pyttsx3
@@ -61,10 +64,12 @@ _EDGE_SYNTH_ATTEMPT_TIMEOUT_SECONDS = 20.0
 _EDGE_SYNTH_ATTEMPTS = 2
 _EDGE_RETRY_DELAY_SECONDS = 0.35
 _EDGE_REQUEST_MIN_INTERVAL_SECONDS = 1.0
-_EDGE_BACKOFF_MAX_SECONDS = 120.0
+_EDGE_BACKOFF_MAX_SECONDS = 300.0
 _EDGE_BUFFERING_NOTICE_SECONDS = 1.5
 _EDGE_RECOVERY_INITIAL_SECONDS = 30.0
-_EDGE_RECOVERY_MAX_SECONDS = 300.0
+_EDGE_RECOVERY_MAX_SECONDS = 900.0
+_EDGE_RECOVERY_STABLE_SECONDS = 60.0
+_EDGE_BATCH_MAX_CHARS = 320
 _EDGE_AUDIO_CACHE_ITEMS = 24
 _EDGE_AUDIO_CACHE_BYTES = 16 * 1024 * 1024
 _EDGE_DIAGNOSTIC_LOG_BYTES = 2 * 1024 * 1024
@@ -101,6 +106,24 @@ class EdgeSynthesisError(RuntimeError):
     def __init__(self, details):
         self.details = dict(details or {})
         super().__init__(self.details.get("category") or "edge_synthesis_failed")
+
+
+class EdgeSchedulingError(EdgeSynthesisError):
+    """Local admission failure; no network request was made."""
+
+
+class EdgeBatchMappingError(RuntimeError):
+    """Metadata cannot safely divide a combined request into sentences."""
+
+
+class _EdgeSentenceAudio(bytes):
+    """Shared MP3 plus a sentence's playback range, without cutting MP3 frames."""
+
+    def __new__(cls, audio, start_ms=0, end_ms=None):
+        result = super().__new__(cls, audio)
+        result.start_ms = start_ms
+        result.end_ms = end_ms
+        return result
 
 
 def _edge_exception_details(exc, *, attempt=None, purpose="playback"):
@@ -143,7 +166,12 @@ def _edge_exception_details(exc, *, attempt=None, purpose="playback"):
         try:
             value = headers.get("Retry-After")
             retry_after = max(0.0, float(value)) if value is not None else None
-        except (AttributeError, TypeError, ValueError):
+        except (TypeError, ValueError):
+            try:
+                retry_after = max(0.0, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                retry_after = None
+        except AttributeError:
             retry_after = None
 
     exception = status_exception or (chain[-1] if chain else exc)
@@ -193,6 +221,10 @@ class _EdgeRequestGovernor:
         self._backoff_until = 0.0
         self._failure_streak = 0
 
+    def cooldown_remaining(self):
+        with self._cv:
+            return max(0.0, self._backoff_until - time.monotonic())
+
     @contextmanager
     def slot(self, timeout, purpose):
         deadline = time.monotonic() + max(0.01, float(timeout))
@@ -204,6 +236,14 @@ class _EdgeRequestGovernor:
             self._waiters.append(ticket)
             while True:
                 now = time.monotonic()
+                if now < self._backoff_until:
+                    self._waiters.remove(ticket)
+                    self._cv.notify_all()
+                    raise EdgeSchedulingError({
+                        "category": "cooldown", "exceptionType": "EdgeSchedulingError",
+                        "statusCode": None, "purpose": purpose,
+                        "cooldownSeconds": round(self._backoff_until - now, 3),
+                    })
                 allowed_at = max(self._next_allowed_at, self._backoff_until)
                 first = min(self._waiters, key=lambda item: (item[0], item[1]))
                 if not self._busy and first[2] is marker and now >= allowed_at:
@@ -214,7 +254,10 @@ class _EdgeRequestGovernor:
                 if remaining <= 0:
                     self._waiters.remove(ticket)
                     self._cv.notify_all()
-                    raise TimeoutError("等待 Edge 合成请求调度超时")
+                    raise EdgeSchedulingError({
+                        "category": "queue_timeout", "exceptionType": "EdgeSchedulingError",
+                        "statusCode": None, "purpose": purpose,
+                    })
                 wait_for = remaining
                 if not self._busy and first[2] is marker and allowed_at > now:
                     wait_for = min(wait_for, allowed_at - now)
@@ -241,23 +284,26 @@ class _EdgeRequestGovernor:
             "access_denied",
             "service_unavailable",
             "timeout",
+            "connection",
+            "no_audio",
         }:
             return 0.0
         with self._cv:
             self._failure_streak += 1
             base = {
-                "rate_limited": 15.0,
-                "access_denied": 15.0,
+                "rate_limited": 60.0,
+                "access_denied": 300.0,
                 "service_unavailable": 5.0,
                 "timeout": 2.0,
+                "connection": 2.0,
+                "no_audio": 2.0,
             }[category]
             retry_after = (details or {}).get("retryAfterSeconds")
             try:
                 retry_after = max(0.0, float(retry_after))
             except (TypeError, ValueError):
                 retry_after = 0.0
-            delay = max(base * (2 ** (self._failure_streak - 1)), retry_after)
-            delay = min(_EDGE_BACKOFF_MAX_SECONDS, delay)
+            delay = max(min(_EDGE_BACKOFF_MAX_SECONDS, base * (2 ** min(self._failure_streak - 1, 10))), retry_after)
             delay += random.uniform(0.0, min(2.0, delay * 0.15))
             self._backoff_until = max(self._backoff_until, time.monotonic() + delay)
             self._cv.notify_all()
@@ -371,7 +417,7 @@ def _sanitize_name(s):
     return re.sub(r"[^A-Za-z0-9_\-]", "_", str(s)) or "default"
 
 
-def synth_audio(text, voice, rate=200, timeout=None):
+def synth_audio(text, voice, rate=200, timeout=None, boundaries=None):
     """用 Edge 神经语音把一句文本合成为 MP3 字节（独立事件循环，线程安全）。"""
     if edge_tts is None:
         raise RuntimeError("edge-tts 未安装")
@@ -379,10 +425,13 @@ def synth_audio(text, voice, rate=200, timeout=None):
     buf = bytearray()
 
     async def _gen():
-        c = edge_tts.Communicate(text, voice, rate=f"{rate_adj:+d}%")
+        options = {"boundary": "WordBoundary"} if boundaries is not None else {}
+        c = edge_tts.Communicate(text, voice, rate=f"{rate_adj:+d}%", **options)
         async for chunk in c.stream():
             if chunk["type"] == "audio":
                 buf.extend(chunk["data"])
+            elif boundaries is not None and chunk["type"] == "WordBoundary":
+                boundaries.append(chunk)
 
     loop = asyncio.new_event_loop()
     try:
@@ -399,7 +448,7 @@ def synth_audio(text, voice, rate=200, timeout=None):
     return bytes(buf)
 
 
-def _synth_audio_governed(text, voice, rate=200, timeout=None, purpose="playback"):
+def _synth_audio_governed(text, voice, rate=200, timeout=None, purpose="playback", raw_fn=None):
     """Run one sanitized, process-wide governed Edge request."""
     request_timeout = (
         _EDGE_SYNTH_TIMEOUT_SECONDS if timeout is None else max(0.01, float(timeout))
@@ -407,7 +456,7 @@ def _synth_audio_governed(text, voice, rate=200, timeout=None, purpose="playback
     try:
         with _EDGE_REQUEST_GOVERNOR.slot(request_timeout, purpose) as remaining:
             try:
-                audio = synth_audio(
+                audio = (raw_fn or synth_audio)(
                     text,
                     voice,
                     rate,
@@ -433,13 +482,14 @@ def _synth_audio_governed(text, voice, rate=200, timeout=None, purpose="playback
                 raise EdgeSynthesisError(details) from exc
             _EDGE_REQUEST_GOVERNOR.report_success()
             return audio
+    except EdgeSchedulingError as exc:
+        LOGGER.info("edge_request_deferred %s", json.dumps(exc.details, ensure_ascii=True, sort_keys=True))
+        raise
     except EdgeSynthesisError:
         raise
     except Exception as exc:
         details = _edge_exception_details(exc, purpose=purpose)
-        details["cooldownSeconds"] = round(
-            _EDGE_REQUEST_GOVERNOR.report_failure(details), 3
-        )
+        # Admission failed locally: never extend the service's cooldown.
         LOGGER.warning(
             "edge_synthesis_failure %s",
             json.dumps(details, ensure_ascii=True, sort_keys=True),
@@ -447,19 +497,56 @@ def _synth_audio_governed(text, voice, rate=200, timeout=None, purpose="playback
         raise EdgeSynthesisError(details) from exc
 
 
-class _EdgePrefetch:
-    """后台批量预取后续句子的音频，缓存最多 MAX_AHEAD 句，句间零卡顿。
+def _edge_batch_ranges(texts, audio, boundaries):
+    """Match word metadata monotonically; never guess timing from text length."""
+    def normalized(text):
+        return "".join(c for c in text if not c.isspace() and not unicodedata.category(c).startswith("P"))
 
-    Multiple workers reserve sentences in order and synthesize them concurrently.
-    Results are keyed by clean-text offset, so playback still consumes them in
-    exact reading order even when a later network request finishes first.
-    """
+    parts = [normalized(text) for text in texts]
+    if any(not part for part in parts):
+        raise EdgeBatchMappingError("empty_sentence")
+    joined = "".join(parts)
+    ends = []
+    for part in parts:
+        ends.append((ends[-1] if ends else 0) + len(part))
+    starts = [None] * len(parts)
+    cursor = 0
+    last_ms = -1
+    for item in boundaries:
+        word = normalized(item.get("text", ""))
+        if not word:
+            continue
+        if not joined.startswith(word, cursor):
+            raise EdgeBatchMappingError("word_mismatch")
+        index = next((i for i, end in enumerate(ends) if cursor < end), None)
+        if index is None or cursor + len(word) > ends[index]:
+            raise EdgeBatchMappingError("word_crosses_sentence")
+        milliseconds = int(item["offset"] / 10000)
+        if milliseconds < last_ms:
+            raise EdgeBatchMappingError("unordered_timestamps")
+        last_ms = milliseconds
+        if starts[index] is None:
+            starts[index] = milliseconds
+        cursor += len(word)
+    if cursor != len(joined) or any(start is None for start in starts):
+        raise EdgeBatchMappingError("incomplete_metadata")
+    starts[0] = 0  # Keep the encoder's leading silence.
+    if any(b <= a for a, b in zip(starts, starts[1:])):
+        raise EdgeBatchMappingError("invalid_ranges")
+    return [_EdgeSentenceAudio(audio, start, starts[i + 1] if i + 1 < len(starts) else None)
+            for i, start in enumerate(starts)]
+
+
+class _EdgePrefetch:
+    """One worker batches short sentences while retaining each clean-text offset."""
 
     MAX_AHEAD = 3
     WORKERS = 1
 
-    def __init__(self, synth_fn, content, start_off, limit=MAX_AHEAD, autostart=True):
+    def __init__(self, synth_fn, content, start_off, limit=MAX_AHEAD, autostart=True, batch_fn=None, cached_fn=None):
         self._synth = synth_fn
+        self._batch = batch_fn
+        self._cached = cached_fn
         self._content = content
         self._limit = limit
         self._lock = threading.Lock()
@@ -492,21 +579,41 @@ class _EdgePrefetch:
             while not self._stopped.is_set():
                 if not self._slots.acquire(timeout=0.2):
                     continue
-                with self._lock:
+                tasks = []
+                while True:
                     off = self._next_off
-                    text, nxt, _ = SpeechController._next_chunk(self._content, off)
+                    text, nxt, relative = SpeechController._next_chunk(self._content, off)
                     if not text or nxt <= off:
                         self._slots.release()
-                        return
+                        break
+                    if tasks and sum(len(t[1]) for t in tasks) + len(text) > _EDGE_BATCH_MAX_CHARS:
+                        self._slots.release()
+                        break
+                    tasks.append((off + relative, text))
                     self._next_off = nxt
+                    if self._batch is None or len(tasks) >= 3 or not self._slots.acquire(blocking=False):
+                        break
+                if not tasks:
+                    return
+                audios = [None] * len(tasks)
                 try:
-                    audio = self._synth(text)
-                    failure = None
+                    audios = [self._cached(off, text) if self._cached else None for off, text in tasks]
+                    missing = [i for i, audio in enumerate(audios) if not audio]
+                    if len(missing) > 1 and self._batch is not None:
+                        generated = self._batch([tasks[i][1] for i in missing])
+                        if len(generated) != len(missing) or not all(generated):
+                            raise EdgeBatchMappingError("incomplete_batch")
+                        for i, audio in zip(missing, generated):
+                            audios[i] = audio
+                    else:
+                        for i in missing:
+                            audios[i] = self._synth(tasks[i][1])
+                    failure = None if all(audios) else {"category": "no_audio", "purpose": "prefetch"}
                 except Exception as exc:
-                    audio = None
                     failure = _edge_exception_details(exc, purpose="prefetch")
                 with self._ready:
-                    self._results[off] = (text, audio, failure)
+                    for (off, text), audio in zip(tasks, audios):
+                        self._results[off] = (text, audio, failure if not audio else None)
                     self._ready.notify_all()
                 if failure is not None:
                     # Preserve the failed sentence for ordered consumption but
@@ -971,6 +1078,7 @@ class WholeBookCacher:
 
 
 class SpeechController:
+    supports_audio_transitions = True
     _SAPI_INTERRUPTED = object()
 
     def __init__(self):
@@ -1004,6 +1112,10 @@ class SpeechController:
         self._edge_recovery_key = None
         self._edge_recovery_audio = None
         self._edge_recovery_event = None
+        self._edge_recovery_details = None
+        self._edge_recovered_at = None
+        self._edge_request_local = threading.local()
+        self._edge_batch_disabled = set()
         self._edge_prime_token = 0
         self._edge_prime_key = None
         self._edge_prime_audio = None
@@ -1030,18 +1142,40 @@ class SpeechController:
         self._hist_check_queue = []
         self._hist_check_worker = None
         self._closed = False
+        self._kokoro = None
+        self._kokoro_voice = "kokoro:v1.0:zf_xiaobei"
+        self._audio_active = False
+        self._audio_generation = None
+
+    def set_kokoro_service(self, service):
+        self._kokoro = service
+
+    def is_audible(self):
+        with self._cv:
+            return self._state == "playing" and self._audio_active and self._audio_generation == self._gen
 
     # ---------- 事件 ----------
     def _post(self, evt, generation=None):
+        if generation == self._gen:
+            previous_audio = self._audio_active
+            if evt.get("type") in {"sentence_start", "sentence_resume"}:
+                self._audio_active = True
+                self._audio_generation = generation
+            elif evt.get("type") in {"sentence_done", "buffering", "error", "finished", "stopped", "audio_end"}:
+                self._audio_active = False
+            if previous_audio != self._audio_active or evt.get("type") == "sentence_resume":
+                evt["audioTransition"] = {"active": self._audio_active, "at": time.monotonic()}
         if generation is not None:
             evt.setdefault("generation", generation)
         self._queue.put(evt)
 
-    def drain(self):
+    def drain(self, include_internal=False):
         out = []
         while True:
             try:
-                out.append(self._queue.get_nowait())
+                event = self._queue.get_nowait()
+                if include_internal or event.get("type") != "audio_end":
+                    out.append(event)
             except queue.Empty:
                 break
         return out
@@ -1071,6 +1205,10 @@ class SpeechController:
         with self._cv:
             return self._backend
 
+    def voice_id(self):
+        with self._cv:
+            return self._kokoro_voice if self._backend == "kokoro" else self._edge_voice if self._backend == "edge" else self._pending_voice or ""
+
     # ---------- 对外设置（只存值，工作线程应用） ----------
     def set_voice(self, voice_id):
         with self._cv:
@@ -1078,6 +1216,9 @@ class SpeechController:
             if not voice_id:
                 self._backend = "sapi"
                 self._pending_voice = None
+            elif voice_id.startswith("kokoro:v1.0:"):
+                self._backend = "kokoro"
+                self._kokoro_voice = voice_id
             elif "HKEY" in voice_id or "TTS_MS" in voice_id or "SOFTWARE" in voice_id:
                 # 系统 SAPI 语音
                 self._backend = "sapi"
@@ -1155,6 +1296,9 @@ class SpeechController:
         self._ensure_thread()
         with self._cv:
             backend = self._backend
+            if backend == "kokoro":
+                # Loading is lazy on the single synthesis worker; no second player.
+                return
             if backend == "sapi":
                 self._warm_sapi_requested = True
                 self._cv.notify_all()
@@ -1189,13 +1333,7 @@ class SpeechController:
             self._edge_prime_key = key
             self._edge_prime_failure = None
             self._edge_prime_event = ready
-            self._edge_prime_prefetch = _EdgePrefetch(
-                self._edge_synthesize,
-                content,
-                next_clean,
-                _EdgePrefetch.MAX_AHEAD,
-                autostart=False,
-            )
+            self._edge_prime_prefetch = self._new_edge_prefetch(content, next_clean, ci, book=book, autostart=False)
             prime_prefetch = self._edge_prime_prefetch
         cached = self._memory_edge_audio(key) or self._cached_audio(ci, original_offset)
         if cached:
@@ -1260,7 +1398,8 @@ class SpeechController:
         """Keep recent audio for pause/restart without another network request."""
         if not audio:
             return
-        audio = bytes(audio)
+        if not isinstance(audio, _EdgeSentenceAudio):
+            audio = bytes(audio)
         with self._cv:
             previous = self._edge_audio_cache.pop(key, None)
             if previous:
@@ -1310,14 +1449,14 @@ class SpeechController:
         with self._book_cachers_lock:
             return self._book_cachers.get(bid)
 
-    def _cached_audio(self, ci, off):
+    def _cached_audio(self, ci, off, *, voice=None, rate=None, book_id=None):
         """按 (章节, 句偏移, 语音, 语速, 书籍) 查找整本缓存中的 MP3；未命中返回 None。"""
         if not self._tts_cache_dir:
             return None
         with self._cv:
-            voice = self._edge_voice
-            rate = int(self._rate)
-        bid = self._book_id or "book"
+            voice = voice or self._edge_voice
+            rate = int(self._rate if rate is None else rate)
+        bid = book_id or self._book_id or "book"
         d = os.path.join(self._tts_cache_dir, bid, _sanitize_name(voice), str(rate))
         p = os.path.join(d, f"{int(ci):04d}_{int(off):08d}.mp3")
         try:
@@ -1796,11 +1935,14 @@ class SpeechController:
 
     # ---------- 控制（GUI 线程调用） ----------
     def start(self, book, chapter_idx, char_offset):
+        if self._kokoro is not None:
+            self._kokoro.cancel_pending()
         self._ensure_thread()
         with self._cv:
             if self._closed:
                 raise RuntimeError("SpeechController 已关闭")
             self._book = book
+            self._audio_active = False
             self._ci = int(chapter_idx)
             self._off = int(char_offset)
             self._gen += 1
@@ -1826,9 +1968,12 @@ class SpeechController:
             return False
 
     def stop(self):
+        if self._kokoro is not None:
+            self._kokoro.cancel_pending()
         with self._cv:
             self._book = None
             self._state = "idle"
+            self._audio_active = False
             self._gen += 1
             self._reset_edge_recovery_locked()
             self._cv.notify_all()
@@ -2053,6 +2198,8 @@ class SpeechController:
                         next_clean,
                         start_event,
                     )
+                elif backend == "kokoro":
+                    ok = self._speak_kokoro(text, gen, clean_text, next_clean, start_event, book, ci)
                 else:
                     ok = self._speak_sapi(text, gen, start_event)
                 if not ok:
@@ -2142,6 +2289,7 @@ class SpeechController:
             if cut < cursor + _MAX_CHUNK // 2:
                 cut = limit
             return content[cursor:cut], cut, cursor - offset
+        return "", total, 0
 
     # ---------- SAPI 后端 ----------
     def _speak_sapi(self, text, gen, start_event=None):
@@ -2239,6 +2387,7 @@ class SpeechController:
                     if self._state == "paused":
                         interrupted_by_pause = True
                         self._engine.stop()  # 暂停：同线程打断
+                        self._post({"type": "audio_end"}, gen)
                         break
                 try:
                     self._engine.iterate()
@@ -2298,13 +2447,79 @@ class SpeechController:
         return True
 
     # ---------- Edge 后端 ----------
+    @contextmanager
+    def _edge_request_context(self, purpose):
+        previous = getattr(self._edge_request_local, "purpose", "playback")
+        self._edge_request_local.purpose = purpose
+        try:
+            yield
+        finally:
+            self._edge_request_local.purpose = previous
+
+    def _new_edge_prefetch(self, content, offset, ci, book=None, autostart=True):
+        with self._cv:
+            book = book or self._book
+            voice, rate, bid = self._edge_voice, int(self._rate), self._book_id
+        chapter = book.chapters[ci] if book is not None and ci < len(book.chapters) else None
+        cmap = chapter.tts_content()[1] if chapter else None
+
+        def cached(off, text):
+            audio = self._memory_edge_audio(("synthesis", voice, rate, text))
+            if not audio and chapter is not None:
+                orig_off = clean_to_orig(cmap, off, len(chapter.content))
+                audio = self._memory_edge_audio((bid, voice, rate, ci, orig_off, text))
+                audio = audio or self._cached_audio(ci, orig_off, voice=voice, rate=rate, book_id=bid)
+            return audio
+
+        def single(text):
+            with self._edge_request_context("prefetch"):
+                return self._edge_synthesize(text)
+
+        def batch(texts):
+            with self._edge_request_context("prefetch"):
+                return self._edge_synthesize_batch(texts)
+
+        return _EdgePrefetch(single, content, offset, autostart=autostart, batch_fn=batch, cached_fn=cached)
+
+    def _edge_synthesize_batch(self, texts):
+        with self._cv:
+            voice, rate = self._edge_voice, int(self._rate)
+        if (voice, rate) in self._edge_batch_disabled:
+            return [self._edge_synthesize(text) for text in texts]
+        metadata = []
+
+        def raw(text, voice, rate, timeout=None):
+            return synth_audio(text, voice, rate, timeout, boundaries=metadata)
+
+        audio = _synth_audio_governed(
+            "\n".join(texts), voice, rate,
+            timeout=_EDGE_SYNTH_ATTEMPT_TIMEOUT_SECONDS,
+            purpose=getattr(self._edge_request_local, "purpose", "prefetch"), raw_fn=raw,
+        )
+        try:
+            segments = _edge_batch_ranges(texts, audio, metadata)
+        except (EdgeBatchMappingError, KeyError, TypeError, ValueError):
+            self._edge_batch_disabled.add((voice, rate))
+            LOGGER.info("edge_batch_disabled metadata_mapping_unavailable")
+            return [self._edge_synthesize(text) for text in texts]
+        for text, segment in zip(texts, segments):
+            self._remember_edge_audio(("synthesis", voice, rate, text), segment)
+        return segments
+
     def _edge_synthesize(self, text):
         with self._cv:
             voice = self._edge_voice
             rate = self._rate
+        purpose = getattr(self._edge_request_local, "purpose", "playback")
+        key = ("synthesis", voice, int(rate), text)
+        if purpose != "recovery":
+            cached = self._memory_edge_audio(key)
+            if cached:
+                return cached
         deadline = time.monotonic() + _EDGE_SYNTH_TIMEOUT_SECONDS
         last_error = None
-        for attempt in range(_EDGE_SYNTH_ATTEMPTS):
+        attempts = 1 if purpose == "recovery" else _EDGE_SYNTH_ATTEMPTS
+        for attempt in range(attempts):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -2314,9 +2529,10 @@ class SpeechController:
                     voice,
                     rate,
                     timeout=min(_EDGE_SYNTH_ATTEMPT_TIMEOUT_SECONDS, remaining),
-                    purpose="playback",
+                    purpose=purpose,
                 )
                 if audio:
+                    self._remember_edge_audio(key, audio)
                     return audio
                 last_error = EdgeSynthesisError(
                     {
@@ -2324,7 +2540,7 @@ class SpeechController:
                         "exceptionType": "EmptyAudio",
                         "statusCode": None,
                         "retryAfterSeconds": None,
-                        "purpose": "playback",
+                        "purpose": purpose,
                         "attempt": attempt + 1,
                     }
                 )
@@ -2332,7 +2548,7 @@ class SpeechController:
                 details = _edge_exception_details(
                     exc,
                     attempt=attempt + 1,
-                    purpose="playback",
+                    purpose=purpose,
                 )
                 last_error = EdgeSynthesisError(details)
                 # A service admission/rate response is authoritative. An
@@ -2342,9 +2558,13 @@ class SpeechController:
                     "rate_limited",
                     "access_denied",
                     "service_unavailable",
+                    "cooldown",
+                    "queue_timeout",
                 }:
                     break
-            if attempt + 1 < _EDGE_SYNTH_ATTEMPTS:
+                if details.get("cooldownSeconds", 0) > 0:
+                    break
+            if attempt + 1 < attempts:
                 remaining = deadline - time.monotonic()
                 if remaining <= _EDGE_RETRY_DELAY_SECONDS:
                     break
@@ -2357,8 +2577,8 @@ class SpeechController:
                 "exceptionType": "TimeoutError",
                 "statusCode": None,
                 "retryAfterSeconds": None,
-                "purpose": "playback",
-                "attempt": _EDGE_SYNTH_ATTEMPTS,
+                "purpose": purpose,
+                "attempt": attempts,
             }
         )
 
@@ -2370,16 +2590,24 @@ class SpeechController:
         self._edge_recovery_key = None
         self._edge_recovery_audio = None
         self._edge_recovery_event = None
+        self._edge_recovery_details = None
 
-    def _schedule_edge_recovery_locked(self):
-        """Schedule the first low-frequency probe after a real Edge failure."""
-        self._edge_recovery_due_at = (
-            time.monotonic() + _EDGE_RECOVERY_INITIAL_SECONDS
+    def _schedule_edge_recovery_locked(self, details=None):
+        """Respect admission responses and retain backoff after a brief recovery."""
+        details = details or {}
+        now = time.monotonic()
+        minimum = {"access_denied": 300.0, "rate_limited": 60.0}.get(
+            details.get("category"), _EDGE_RECOVERY_INITIAL_SECONDS
         )
-        self._edge_recovery_backoff = _EDGE_RECOVERY_INITIAL_SECONDS
+        if self._edge_recovered_at is not None and now - self._edge_recovered_at < _EDGE_RECOVERY_STABLE_SECONDS:
+            minimum = max(minimum, min(_EDGE_RECOVERY_MAX_SECONDS, self._edge_recovery_backoff * 2))
+        self._edge_recovery_backoff = max(minimum, float(details.get("retryAfterSeconds") or 0))
+        delay = max(self._edge_recovery_backoff, _EDGE_REQUEST_GOVERNOR.cooldown_remaining())
+        self._edge_recovery_due_at = now + delay + random.uniform(0, min(2.0, delay * 0.1))
         self._edge_recovery_key = None
         self._edge_recovery_audio = None
         self._edge_recovery_event = None
+        self._edge_recovery_details = None
 
     def _ensure_edge_recovery_probe(self, text, gen):
         """Start at most one background connectivity probe for this session."""
@@ -2394,6 +2622,10 @@ class SpeechController:
                 or time.monotonic() < self._edge_recovery_due_at
             ):
                 return False
+            cooldown = _EDGE_REQUEST_GOVERNOR.cooldown_remaining()
+            if cooldown > 0:
+                self._edge_recovery_due_at = time.monotonic() + cooldown
+                return False
             token = self._edge_recovery_token
             key = (gen, token, self._edge_voice, int(self._rate))
             ready = threading.Event()
@@ -2403,12 +2635,16 @@ class SpeechController:
 
         def probe():
             try:
-                audio = self._edge_synthesize(text)
-            except Exception:
+                with self._edge_request_context("recovery"):
+                    audio = self._edge_synthesize(text)
+                details = None
+            except Exception as exc:
                 audio = None
+                details = _edge_exception_details(exc, purpose="recovery")
             with self._cv:
                 if key == self._edge_recovery_key:
                     self._edge_recovery_audio = audio
+                    self._edge_recovery_details = details
                     ready.set()
 
         threading.Thread(
@@ -2438,15 +2674,20 @@ class SpeechController:
             if audio:
                 self._edge_session_fallback = False
                 self._edge_recovery_due_at = 0.0
-                self._edge_recovery_backoff = _EDGE_RECOVERY_INITIAL_SECONDS
+                self._edge_recovered_at = time.monotonic()
                 self._edge_fail_posted = False
                 return True
-            delay = self._edge_recovery_backoff
-            self._edge_recovery_due_at = time.monotonic() + delay
+            details = self._edge_recovery_details or {}
             self._edge_recovery_backoff = min(
                 _EDGE_RECOVERY_MAX_SECONDS,
-                max(_EDGE_RECOVERY_INITIAL_SECONDS, delay * 2),
+                max(_EDGE_RECOVERY_INITIAL_SECONDS, self._edge_recovery_backoff * 2),
             )
+            minimum = {"access_denied": 300.0, "rate_limited": 60.0}.get(details.get("category"), 0)
+            delay = max(self._edge_recovery_backoff, minimum,
+                        float(details.get("retryAfterSeconds") or 0),
+                        _EDGE_REQUEST_GOVERNOR.cooldown_remaining())
+            self._edge_recovery_backoff = delay
+            self._edge_recovery_due_at = time.monotonic() + delay + random.uniform(0, min(2.0, delay * 0.1))
             return False
 
     def _speak_edge(
@@ -2506,13 +2747,13 @@ class SpeechController:
             text,
         )
         if not primed:
-            audio = self._memory_edge_audio(cache_key) or self._cached_audio(ci, off)
+            audio = (self._memory_edge_audio(cache_key)
+                     or self._memory_edge_audio(("synthesis", self._edge_voice, int(self._rate), text))
+                     or self._cached_audio(ci, off))
         if audio:
             self._remember_edge_audio(cache_key, audio)
             if self._edge_prefetch is None:
-                self._edge_prefetch = _EdgePrefetch(
-                    self._edge_synthesize, content, next_off, _EdgePrefetch.MAX_AHEAD
-                )
+                self._edge_prefetch = self._new_edge_prefetch(content, next_off, ci)
             return play_edge(audio)
         if primed:
             # The single-flight preparation already failed.  Do not perform
@@ -2528,12 +2769,7 @@ class SpeechController:
                 audio = None
                 failure_details = _edge_exception_details(exc, purpose="playback")
             if audio:
-                self._edge_prefetch = _EdgePrefetch(
-                    self._edge_synthesize,
-                    content,
-                    next_off,
-                    _EdgePrefetch.MAX_AHEAD,
-                )
+                self._edge_prefetch = self._new_edge_prefetch(content, next_off, ci)
         else:
             audio = None
             while not self._should_stop(gen):
@@ -2559,11 +2795,10 @@ class SpeechController:
         if audio:
             self._remember_edge_audio(cache_key, audio)
             return play_edge(audio)
-        # A real synthesis failure keeps the existing fallback behavior, but
-        # locks the remainder of this session to SAPI to prevent voice flapping.
+        # Keep SAPI active until a scheduled, single recovery request succeeds.
         self._edge_session_fallback = True
         with self._cv:
-            self._schedule_edge_recovery_locked()
+            self._schedule_edge_recovery_locked(failure_details)
         if not self._edge_fail_posted:
             self._edge_fail_posted = True
             self._post(
@@ -2591,14 +2826,46 @@ class SpeechController:
             self._edge_prefetch = None
         return self._speak_sapi(text, gen, start_event)
 
-    def _speak_edge_play(self, audio, gen, start_event=None):
+    def _speak_kokoro(self, text, gen, content, next_offset, start_event, book=None, chapter_index=0):
+        if self._kokoro is None:
+            raise RuntimeError("请先安装Kokoro离线音色包。")
+        future = self._kokoro.request(text, self._kokoro_voice, self._rate)
+        offset = next_offset
+        for _ in range(3):
+            following, end, _start = self._next_chunk(content, offset)
+            if not following and book is not None and chapter_index + 1 < len(book.chapters):
+                chapter_index += 1
+                content = book.chapters[chapter_index].tts_content()[0]
+                offset = 0
+                following, end, _start = self._next_chunk(content, offset)
+            if not following or self._should_stop(gen):
+                break
+            self._kokoro.request(following, self._kokoro_voice, self._rate)
+            offset = end
+        started = time.monotonic()
+        buffering = False
+        while not future.done():
+            if self._should_stop(gen):
+                return False
+            if not buffering and time.monotonic() - started >= .3:
+                self._post({"type": "buffering"}, gen)
+                buffering = True
+            with self._cv:
+                self._cv.wait(timeout=.05)
+        with self._cv:
+            self._cv.wait_for(lambda: self._state != "paused" or self._gen != gen)
+        if self._should_stop(gen):
+            return False
+        return self._speak_edge_play(future.result().read_bytes(), gen, start_event, backend="kokoro")
+
+    def _speak_edge_play(self, audio, gen, start_event=None, backend="edge"):
         """用 Windows MCI（winmm.dll）播放预生成的 MP3，支持暂停/停止（零第三方依赖）。"""
         if not audio:
             return False
-        self._active_sentence_backend = "edge"
+        self._active_sentence_backend = backend
         tmp_path = None
         try:
-            tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav" if backend == "kokoro" else ".mp3", delete=False)
             tmp_path = tmp.name
             tmp.write(audio)
             tmp.flush()
@@ -2606,11 +2873,19 @@ class SpeechController:
             _mci_open(tmp_path)
             _mci_set_volume(self._volume)  # MCI 层音量（回退）
             _set_process_volume(self._volume)  # Core Audio 进程音量（主要）
-            _mci_play()
+            segment = audio if isinstance(audio, _EdgeSentenceAudio) else None
             with self._cv:
+                if backend == "kokoro":
+                    self._cv.wait_for(lambda: self._state != "paused" or self._gen != gen or self._book is None)
+                    if self._state == "idle" or self._gen != gen or self._book is None:
+                        return False
+                if segment is not None:
+                    _mci_play_range(segment.start_ms, segment.end_ms)
+                else:
+                    _mci_play()
                 seen_resume = self._resume_counter
-            if start_event is not None:
-                self._post(dict(start_event), gen)
+                if start_event is not None:
+                    self._post(dict(start_event), gen)
             while _mci_playing():
                 with self._cv:
                     if self._state == "idle" or self._book is None or self._gen != gen:
@@ -2618,11 +2893,15 @@ class SpeechController:
                         break
                     if self._state == "paused":
                         _mci_pause()
+                        self._post({"type": "audio_end"}, gen)
                         self._cv.wait()
                         if self._state == "idle" or self._book is None or self._gen != gen:
                             _mci_stop()
                             break
-                        _mci_resume()
+                        if segment is not None:
+                            _mci_play_range(None, segment.end_ms)
+                        else:
+                            _mci_resume()
                     if self._resume_counter != seen_resume:
                         seen_resume = self._resume_counter
                         # A very fast resume can happen before the worker
@@ -2635,7 +2914,7 @@ class SpeechController:
             self._post(
                 {
                     "type": "error",
-                    "code": "EDGE_PLAYBACK_FAILED",
+                    "code": "KOKORO_PLAYBACK_FAILED" if backend == "kokoro" else "EDGE_PLAYBACK_FAILED",
                     "message": f"播放出错：{e}",
                     "retryable": True,
                     "fallback_backend": None,
@@ -2669,7 +2948,8 @@ def _mci_send(cmd):
 
 def _mci_open(path):
     _mci_close()
-    cmd = f'open "{path}" type mpegvideo alias {_MCI_ALIAS}'
+    media_type = "waveaudio" if str(path).lower().endswith(".wav") else "mpegvideo"
+    cmd = f'open "{path}" type {media_type} alias {_MCI_ALIAS}'
     err, _ = _mci_send(cmd)
     if err != 0:
         raise RuntimeError(f"MCI open 失败 code={err}")
@@ -2703,6 +2983,20 @@ def _mci_play():
     err, _ = _mci_send(f"play {_MCI_ALIAS}")
     if err:
         raise RuntimeError(f"MCI play 失败 code={err}")
+
+
+def _mci_play_range(start_ms, end_ms):
+    err, _ = _mci_send(f"set {_MCI_ALIAS} time format milliseconds")
+    if err:
+        raise RuntimeError(f"MCI time format 失败 code={err}")
+    command = f"play {_MCI_ALIAS}"
+    if start_ms is not None:
+        command += f" from {int(start_ms)}"
+    if end_ms is not None:
+        command += f" to {int(end_ms)}"
+    err, _ = _mci_send(command)
+    if err:
+        raise RuntimeError(f"MCI play range 失败 code={err}")
 
 
 def _mci_pause():

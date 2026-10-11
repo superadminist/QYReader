@@ -12,6 +12,7 @@ from typing import Any
 
 from .library_lock import library_write_lock
 from .paths import default_data_dir
+from .feature_store import status_for, taxonomy
 
 
 DEFAULT_COVER_URLS = (
@@ -121,7 +122,7 @@ class LibraryQueryService:
             books.sort(key=lambda book: positions.get(book["id"], len(positions)))
         else:
             books.sort(key=lambda book: book["lastReadAt"] or 0, reverse=True)
-        return {"books": books, "total": len(books), "sortMode": mode}
+        return {"books": books, "total": len(books), "sortMode": mode, **taxonomy(payload)}
 
 
     @staticmethod
@@ -161,6 +162,11 @@ class LibraryQueryService:
             "totalChars": total_chars,
             "coverUrl": _default_cover_url(resolved_book_id),
             "canRevealSource": isinstance(metadata.get("path"), str) and bool(metadata["path"].strip()),
+            "contentType": metadata.get("content_type", ""),
+            "categoryId": metadata.get("category_id", ""),
+            "tagIds": metadata.get("tag_ids", []) if isinstance(metadata.get("tag_ids", []), list) else [],
+            "readingStatus": status_for(metadata),
+            "statusMode": metadata.get("reading_status_mode", "auto"),
         }
 
 

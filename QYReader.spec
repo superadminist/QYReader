@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import sys
+from PyInstaller.utils.hooks import collect_dynamic_libs
 
 
 ROOT = Path(SPECPATH)
@@ -17,7 +18,7 @@ if not (FRONTEND_DIST / "index.html").is_file():
 a = Analysis(
     [str(ROOT / "novelreader" / "main.py")],
     pathex=[str(ROOT)],
-    binaries=[],
+    binaries=collect_dynamic_libs("sherpa_onnx"),
     datas=[
         (str(ROOT / "assets" / "app.ico"), "assets"),
         (str(FRONTEND_DIST), "prototype/dist/client"),
@@ -32,6 +33,8 @@ a = Analysis(
         "pycaw.api",
         "comtypes",
         "psutil",
+        "sherpa_onnx",
+        "sherpa_onnx.lib._sherpa_onnx",
     ],
     hookspath=[],
     hooksconfig={},

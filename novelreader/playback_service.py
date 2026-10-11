@@ -45,6 +45,61 @@ class PlaybackService:
         self._deferred_sentence_start = None
         self._sentence_cache = {}
         self._closed = False
+        self._purpose = "book"
+        self._preview_context = None
+        self._audio_transition_pending = None
+
+    def preview(self, text, voice_id):
+        from .book_loader import BookContent, Chapter
+        with self._lock:
+            self._ensure_open()
+            if self._preview_context is not None:
+                self._restore_preview()
+            speech = self._speech
+            old_voice = speech._kokoro_voice if speech.backend() == "kokoro" else speech._edge_voice if speech.backend() == "edge" else speech._pending_voice or ""
+            self._preview_context = (self._book, self._session_id, self._book_id, self._chapter_index, self._char_offset, self._sentence, self._status, old_voice)
+            self._generation = speech.stop()
+            if self._book is not None:
+                self._status = "paused" if self._status in {"playing", "paused"} else self._status
+                self._active_backend = None
+                self._fallback_active = False
+                self._queue_event("state")
+            self._book = BookContent("音色试听", "", "txt", [Chapter("音色试听", text)])
+            self._session_id = self._session_id or "voice-preview"
+            self._book_id = self._book_id or "voice-preview"
+            self._chapter_index = self._char_offset = 0
+            self._sentence = None
+            self._sentence_cache.clear()
+            self._purpose = "preview"
+            speech.set_voice(voice_id)
+            self._generation = speech.start(self._book, 0, 0)
+            self._status = "playing"
+            self._terminal_generation = None
+            self._active_backend = speech.backend()
+            self._command_id = uuid.uuid4().hex
+            self._queue_event("state")
+            return {"commandId": self._command_id, "accepted": True}
+
+    def _restore_preview(self):
+        if self._preview_context is None:
+            return
+        book, session, bid, ci, off, sentence, status, voice = self._preview_context
+        self._preview_context = None
+        self._generation = self._speech.stop()
+        self._speech.set_voice(voice)
+        self._book, self._session_id, self._book_id = book, session, bid
+        self._chapter_index, self._char_offset, self._sentence = ci, off, sentence
+        self._status = "paused" if status in {"playing", "paused"} else status
+        self._purpose = "book"
+        self._active_backend = None
+        self._sentence_cache.clear()
+        self._terminal_generation = None
+
+    def cancel_preview(self):
+        with self._lock:
+            if self._preview_context is not None:
+                self._restore_preview()
+                self._queue_event("state")
 
     @property
     def speech_controller(self):
@@ -67,6 +122,8 @@ class PlaybackService:
             raise ValueError("reader session, book id and content are required")
         with self._lock:
             self._ensure_open()
+            if self._preview_context is not None:
+                self._restore_preview()
             self._generation = self._speech.stop()
             self._session_id = str(session_id)
             self._book_id = str(book_id)
@@ -91,6 +148,8 @@ class PlaybackService:
         """同步阅读位置；显式导航可从新位置继续正在进行的朗读。"""
         with self._lock:
             self._ensure_bound()
+            if self._preview_context is not None:
+                self._restore_preview()
             if self._status == "playing" and not restart_playing:
                 return self._position()
             self._chapter_index, self._char_offset = self._clamp_position(
@@ -124,6 +183,11 @@ class PlaybackService:
             raise ValueError("unsupported playback command")
         command_id = str(command_id or uuid.uuid4().hex)
         with self._lock:
+            if self._preview_context is not None:
+                self._restore_preview()
+                self._queue_event("state")
+                if command == "stop":
+                    return {"commandId": command_id, "accepted": True}
             self._ensure_bound()
             if session_id is not None and str(session_id) != self._session_id:
                 raise RuntimeError("reader session is not bound")
@@ -150,8 +214,11 @@ class PlaybackService:
                 "position": self._position(),
                 "sentence": dict(self._sentence) if self._sentence else None,
                 "requestedBackend": requested,
+                "requestedVoiceId": getattr(self._speech, "voice_id", lambda: "")(),
                 "activeBackend": self._active_backend,
                 "fallbackActive": self._fallback_active,
+                "purpose": self._purpose,
+                "phase": "speaking" if getattr(self._speech, "is_audible", lambda: False)() else "buffering" if self._status == "playing" else self._status,
             }
 
     def prepare_current(self):
@@ -221,6 +288,9 @@ class PlaybackService:
         with self._lock:
             self._ensure_open()
             self._flush_speech_events()
+            if self._purpose == "preview" and self._status in {"finished", "error"}:
+                self._restore_preview()
+                self._queue_event("state")
             output = list(self._pending_events)
             self._pending_events.clear()
             return output
@@ -261,6 +331,8 @@ class PlaybackService:
     def shutdown(self, timeout=2.0):
         """停止唯一控制器；等待有上限，返回工作线程是否已退出。"""
         with self._lock:
+            if self._preview_context is not None:
+                self._restore_preview()
             if self._closed:
                 return True
             self._closed = True
@@ -289,7 +361,7 @@ class PlaybackService:
         # Do not publish a deferred audio-start on the UI's Resume click.
         # Edge/MCI confirms the actual resume from its worker thread; SAPI
         # announces the restarted utterance with a fresh sentence_start.
-        if self._active_backend != "edge":
+        if self._active_backend not in {"edge", "kokoro"}:
             self._deferred_sentence_start = None
         self._queue_event("state")
         return True
@@ -349,6 +421,9 @@ class PlaybackService:
         if generation != self._generation:
             return None
         event_type = raw.get("type")
+        self._audio_transition_pending = raw.get("audioTransition")
+        if event_type == "audio_end":
+            return self._event("state")
         if event_type == "sentence_start":
             if self._status == "paused" or (defer_sentence_start and self._status == "playing"):
                 # A start event can race with the 25 ms Qt polling boundary
@@ -379,7 +454,7 @@ class PlaybackService:
             self._deferred_sentence_start = None
             if deferred is not None and self._status == "playing":
                 return self._consume_raw_event(deferred)
-            return None
+            return self._event("state") if raw.get("audioTransition") else None
         if event_type == "sentence_done":
             self._chapter_index, self._char_offset = self._clamp_position(
                 raw["chapter_idx"], raw["char_offset"]
@@ -437,7 +512,8 @@ class PlaybackService:
         return None
 
     def _flush_speech_events(self, defer_sentence_start=False):
-        for raw in self._speech.drain():
+        events = self._speech.drain(include_internal=True) if getattr(self._speech, "supports_audio_transitions", False) else self._speech.drain()
+        for raw in events:
             event = self._consume_raw_event(raw, defer_sentence_start)
             if event is not None:
                 self._pending_events.append(event)
@@ -447,7 +523,7 @@ class PlaybackService:
 
     def _event(self, reason, error=None):
         self._sequence += 1
-        return {
+        event = {
             "schemaVersion": SCHEMA_VERSION,
             "sessionId": self._session_id,
             "bookId": self._book_id,
@@ -457,6 +533,10 @@ class PlaybackService:
             "playback": self.snapshot(),
             "error": error,
         }
+        if self._audio_transition_pending is not None:
+            event["audioTransition"] = self._audio_transition_pending
+            self._audio_transition_pending = None
+        return event
 
     def _position(self):
         if self._book is None:

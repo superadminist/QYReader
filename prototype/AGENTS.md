@@ -10,6 +10,8 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 ## Confirmed design direction
 
+- The Kokoro, annotations, statistics, and library organization additions must preserve the existing UI style, themes, typography, radii, icons and spacing. Reuse existing settings, sidebar, card menus and modal patterns; do not redesign the main or floating surfaces.
+
 - Content-library import cards are ordered left to right: 导入文件, 粘贴文本, 网页链接, 播客 / 音频.
 - The React UI in this directory is the production Qt WebEngine frontend as well as the browser prototype; contract changes must update both Qt and demo transports and rebuild `dist/client`.
 - Match the supplied `key-ui` screenshots as a macOS-style desktop reading experience.

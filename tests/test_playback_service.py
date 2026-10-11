@@ -651,6 +651,13 @@ class PlaybackServiceTests(unittest.TestCase):
 
 
 class SpeechControllerContractTests(unittest.TestCase):
+    def setUp(self):
+        # Each scenario owns its scheduler; a simulated rejection must not
+        # leave a real cooldown for later tests or slow the suite by minutes.
+        patcher = mock.patch.object(tts_engine, "_EDGE_REQUEST_GOVERNOR", tts_engine._EdgeRequestGovernor(min_interval=0))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_next_chunk_starts_at_an_arbitrary_character_offset(self):
         content = "第一句可以从这里继续朗读。第二句。"
         offset = content.index("这里")
@@ -1147,7 +1154,7 @@ class SpeechControllerContractTests(unittest.TestCase):
         def flaky_synth(text, voice, rate, timeout=None):
             calls.append((text, voice, rate, timeout))
             if len(calls) == 1:
-                raise ConnectionError("temporary network failure")
+                raise RuntimeError("temporary synthesis failure")
             return b"recovered-audio"
 
         with (
@@ -1731,6 +1738,7 @@ class SpeechControllerContractTests(unittest.TestCase):
             return text.encode("utf-8")
 
         controller._edge_synthesize = synthesize
+        controller._edge_synthesize_batch = lambda texts: [synthesize(text) for text in texts]
         controller.prepare(make_book("第一句。第二句！第三句？第四句。", ""), 0, 0)
         try:
             time.sleep(0.05)

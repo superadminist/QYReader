@@ -27,12 +27,19 @@ export interface BookSummary {
   totalChars: number;
   coverUrl: string;
   canRevealSource: boolean;
+  contentType?: "" | "novel" | "article" | "reference";
+  categoryId?: string;
+  tagIds?: string[];
+  readingStatus?: "unread" | "reading" | "read";
+  statusMode?: "auto" | "manual";
 }
 
 export interface LibraryState {
   books: BookSummary[];
   total: number;
   sortMode: "recent" | "manual";
+  categories?: ShelfTerm[];
+  tags?: ShelfTerm[];
 }
 
 export type AppTheme = "白天" | "护眼" | "夜间" | "米黄";
@@ -76,8 +83,11 @@ export interface SoftwareUpdateState {
 export interface SpeechVoiceOption {
   id: string;
   label: string;
-  backend: "sapi" | "edge";
+  backend: "sapi" | "edge" | "kokoro";
   requiresNetwork: boolean;
+  available?: boolean;
+  speakerId?: number;
+  modelId?: string;
 }
 
 export interface SpeechPreferences {
@@ -253,9 +263,12 @@ export interface ReaderPlaybackSnapshot {
   status: PlaybackStatus;
   position: ReaderPosition;
   sentence: ReaderSentence | null;
-  requestedBackend: "sapi" | "edge";
-  activeBackend: "sapi" | "edge" | null;
+  requestedBackend: "sapi" | "edge" | "kokoro";
+  requestedVoiceId?: string;
+  activeBackend: "sapi" | "edge" | "kokoro" | null;
   fallbackActive: boolean;
+  purpose?: "book" | "preview";
+  phase?: "speaking" | "buffering" | PlaybackStatus;
 }
 
 export interface ReaderSettings {
@@ -357,6 +370,10 @@ export interface ReaderBookmark {
   text: string;
   note: string;
   createdAt: number;
+  kind?: "bookmark" | "annotation";
+  color?: "yellow" | "green" | "blue" | "pink";
+  updatedAt?: number;
+  locationValid?: boolean;
 }
 
 export interface ReaderBookmarkPage {
@@ -393,6 +410,7 @@ export interface ReaderPlaybackEvent {
     | "error";
   playback: ReaderPlaybackSnapshot;
   error: BridgeError | null;
+  audioTransition?: { active: boolean; at: number };
 }
 
 export type FloatingReaderBackground = "light" | "sepia" | "dark";
@@ -463,6 +481,8 @@ export interface ReaderControls {
     startOffset: number;
     endOffset: number;
     note: string;
+    kind?: "bookmark" | "annotation";
+    color?: "yellow" | "green" | "blue" | "pink";
   }): Promise<BridgeResponse<ReaderBookmark>>;
   removeBookmark(input: {
     sessionId: string;
@@ -531,6 +551,7 @@ export interface WindowControls {
 }
 
 export interface BridgeConnection {
+  features: { invoke<T extends ReaderFeatureRequest>(input: T): Promise<BridgeResponse<ReaderFeatureResult<T>>> };
   mode: "demo" | "native";
   initialState: InitialStateResponse;
   controls: WindowControls;
@@ -556,6 +577,31 @@ export interface BridgeConnection {
   onFloatingPointerChanged(callback: (inside: boolean) => void): void;
   dispose(): void;
 }
+
+export interface ShelfTerm { id: string; name: string; builtin?: boolean }
+export interface ModelState {
+  modelId: "kokoro-v1.0-int8";
+  status: "missing" | "downloading" | "verifying" | "extracting" | "loading" | "ready" | "error" | "cancelled";
+  jobId: string; downloadedBytes: number; totalBytes: number; progressPercent: number;
+  installedBytes: number; directory: string; message: string; error: BridgeError | null;
+  playback?: ReaderPlaybackSnapshot;
+}
+export interface TimeSummary { readingMs: number; listeningMs: number; overlapMs: number; totalMs: number }
+export interface StatisticsState { today: TimeSummary; total: TimeSummary; days: (TimeSummary & { date: string })[] }
+export type ReaderFeatureResult<T extends ReaderFeatureRequest> =
+  T["action"] extends "modelState" | "modelDownload" | "modelRetry" | "modelCancel" | "modelImport" | "modelDirectory" ? ModelState :
+  T["action"] extends "statistics" ? StatisticsState :
+  T["action"] extends "organizationState" | "organizationUpdate" ? { categories: ShelfTerm[]; tags: ShelfTerm[] } :
+  T["action"] extends "updateNote" ? ReaderBookmark :
+  T["action"] extends "exportNotes" ? { saved: boolean; cancelled: boolean } :
+  T["action"] extends "previewVoice" ? ReaderPlaybackCommandData : { accepted: boolean };
+export type ReaderFeatureRequest =
+  | { action: "modelState" | "modelDownload" | "modelRetry" | "modelCancel" | "modelImport" | "modelDirectory" | "organizationState" | "statistics" }
+  | { action: "previewVoice"; voiceId: string }
+  | { action: "updateNote"; sessionId: string; bookmarkId: string; patch: { note?: string; color?: string } }
+  | { action: "exportNotes"; sessionId: string; format: "md" | "txt" }
+  | { action: "activity"; surface: "main" | "floating"; sessionId: string; visible: boolean; inputSequence: number }
+  | { action: "organizationUpdate"; request: { action: "book" | "create" | "rename" | "delete"; bookId?: string; patch?: Partial<Pick<BookSummary, "contentType" | "categoryId" | "tagIds" | "readingStatus" | "statusMode">>; kind?: "categories" | "tags"; id?: string; name?: string } };
 
 export class BridgeProtocolError extends Error {
   code: string;

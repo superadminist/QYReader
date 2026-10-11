@@ -8,6 +8,15 @@
 
 ## 当前版本能力
 
+### v2.1.8
+
+- 免费离线朗读：设置中心可下载或手动导入 **Kokoro v1.0 INT8** 官方模型包，提供晓北、晓妮、晓晓、晓伊、云健、云希、云夏、云扬的选择与试听。Edge、SAPI仍保留，共用一个SpeechController / PlaybackService。生成速度不足时显示等待，不自动更换音色。
+- 划线笔记：选中文字后选择颜色、添加备注或设置朗读起点；书签面板可编辑、删除、定位及导出Markdown / TXT。旧书签仍保留，定位使用正文Unicode码点，改变字号、行距不改变锚点。
+- 阅读统计：主窗口和悬浮窗共用本地统计，显示今日、累计时长及一年热力图。阅读要求正文前台可见且最近5分钟有操作；后台实际播放计听书，生成、缓冲、暂停及试听不计听书。总时长去除阅读与听书的重叠；没有历史数据时从零开始。
+- 书架组织：独立内容类型（小说/文章/资料）、单分类、多标签及未读/阅读中/已读筛选。待读为内置标签；首次有效使用进入阅读中，进度100%进入已读，也允许手动锁定状态。重复导入保留进度、书签及未知字段。
+
+新增界面沿用既有主题、控件、圆角和排版。本地源码测试不能证明已安装版本具有这些功能，真实听感仍需人工试听。
+
 - 内容库：读取现有书架、搜索、最近阅读、空状态和自动打开上次阅读内容。
 - 内容导入：支持文件选择、粘贴文本和网页链接；文件格式包括 TXT、MD/Markdown、DOC/DOCX、EPUB、MOBI、AZW3、PDF、HTML/HTM、ZIP。
 - 文档与网页：Markdown 保留正文，去掉格式符号、图片、链接地址、元数据和代码块；DOC 支持未加密的 Word 97–2003 二进制文档，DOCX 支持正文及表格文字；网页通过 HTTP/HTTPS 提取文章正文并保存本地副本，导入后可离线阅读、朗读、搜索和保存进度。网页不会执行脚本或读取浏览器登录状态，需登录、验证码或动态加载的页面可复制正文后使用粘贴文本。
@@ -28,6 +37,7 @@
 
 | 版本 | 主要更新 |
 | --- | --- |
+| [v2.1.8](release-notes/v2.1.8.md) | 新增可选 Kokoro 离线朗读、划线笔记、阅读统计及分类标签，延续现有界面风格。 |
 | [v2.1.7](release-notes/v2.1.7.md) | 调整 Windows 透明窗口合成，处理内容库整块闪白，保留圆角与悬停动画。 |
 | [v2.1.6](release-notes/v2.1.6.md) | 悬浮窗新增全文朗读进度，支持通过开关选择纯展示或点击、拖动跳转。 |
 | [v2.1.5](release-notes/v2.1.5.md) | 新增 MD、DOC 与网页正文阅读，优化内容库动画、滚动、切换和长目录，调整导入入口顺序。 |
@@ -46,7 +56,7 @@
 
 ```text
 React 界面（prototype/src）
-        │  唯一契约：prototype/src/bridge.d.ts（schemaVersion 1）
+        │  唯一契约：prototype/src/bridge.d.ts（schemaVersion 2）
         ▼
 QWebChannel / DesktopBridge（novelreader/qt_bridge.py）
         │
@@ -67,11 +77,17 @@ Qt 主窗口 ───────┴────── 独立 Qt 悬浮窗
 - 正文缓存：`<安装目录>\data\cache\`
 - 导入源文件备份：`<安装目录>\data\cache\sources\`
 - 语音缓存：`<安装目录>\data\tts_cache\`
+- 可选离线模型：`<安装目录>\data\models\kokoro\v1.0\int8\`（可另选磁盘目录，路径保存在 `kokoro-model.json`）
+- 阅读与听书统计：`<安装目录>\data\reading_stats.sqlite3`（SQLite事务保存，异常退出不补计离线时间）
 - Edge 连接诊断：`<安装目录>\data\logs\edge-tts.log`（轮转保留，不含正文、令牌或完整 URL）
 
 安装版首次启动且 `<安装目录>\data` 不存在时，会把旧版多多朗读的 `%APPDATA%\DDNovelReader` 完整复制到新位置，旧目录不会删除。为兼容已有开发数据，源码运行仍使用该历史目录；测试可继续通过 `DOUBAO_NOVEL_DATA` 指定隔离目录。
 
 应用不会上传书架、正文或阅读进度。只有选用 Edge 在线语音时，朗读文本会按 Edge TTS 的工作方式发送给该服务；本地 SAPI5 不需要网络。
+
+Kokoro只在首次下载模型时访问官方GitHub；模型安装后合成、试听与播放使用本地文件。INT8压缩包为132,303,094字节，固定SHA256为 `4c3052abaa60943a341f193888cf6abd68787dae6ab8ae5c925a706caa247e4e`。模型独立于主安装包，升级不重新下载；本轮实测展开文件约181.1 MiB，音频缓存另计（默认上限500 MiB）。手动导入必须为相同官方模型包，校验失败保留导入原包。
+
+首次新增功能写入前会保留 `library.json.before-reader-features.bak`。统计每5秒保存并在播放阶段切换时提交；异常退出可能损失最后不足5秒，旧阅读进度不会转换成历史时长。
 
 升级安装不会覆盖安装目录中的 `data`，卸载也默认保留它。设置更新会保留现有书籍和未知字段。建议升级前备份 `<安装目录>\data`；不要把真实书架、受版权保护的样书或本地缓存提交到 Git。
 
@@ -144,6 +160,14 @@ npm.cmd --prefix prototype run build
 ```bat
 .venv\Scripts\python.exe tests\stage3_performance_qa.py
 ```
+
+Kokoro实测使用自建文本及隔离模型目录，不使用真实书架：
+
+```bat
+.venv\Scripts\python.exe tests\kokoro_performance_qa.py --model-dir "隔离目录\models\kokoro\v1.0\int8" --output "仓库外\kokoro-performance.json"
+```
+
+脚本比较1/2/4线程的生成耗时、音频时长、RTF和内存，并生成八音色试听文件。RTF大于1表示该次合成慢于音频播放，不保证连续无等待；缓存回放和首次生成需分别看待。测量时应避免同时打包等CPU密集任务。自动生成及播放事件通过不等于真实扬声器听感通过。
 
 真实桌面/DPI 验收需要可用的 Windows 图形会话和 Node.js 20+：
 

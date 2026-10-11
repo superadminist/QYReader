@@ -195,7 +195,7 @@ function validSpeechState(state) {
       voice
       && typeof voice.id === "string"
       && typeof voice.label === "string"
-      && ["sapi", "edge"].includes(voice.backend)
+      && ["sapi", "edge", "kokoro"].includes(voice.backend)
       && typeof voice.requiresNetwork === "boolean"
     ))
     && typeof state.loadingLocalVoices === "boolean"
@@ -464,8 +464,8 @@ function validReaderPlayback(playback) {
     && PLAYBACK_STATUSES.has(playback.status)
     && validReaderPosition(playback.position)
     && validReaderSentence(playback.sentence)
-    && ["sapi", "edge"].includes(playback.requestedBackend)
-    && (playback.activeBackend === null || ["sapi", "edge"].includes(playback.activeBackend))
+    && ["sapi", "edge", "kokoro"].includes(playback.requestedBackend)
+    && (playback.activeBackend === null || ["sapi", "edge", "kokoro"].includes(playback.activeBackend))
     && typeof playback.fallbackActive === "boolean",
   );
 }
@@ -1006,6 +1006,11 @@ function createNativeConnection(nativeBridge, initialState) {
     library: nativeLibrary(nativeBridge),
     reader: nativeReader(nativeBridge),
     floating: nativeFloating(nativeBridge),
+    features: {
+      invoke(input) {
+        return invokeReader(nativeBridge, "readerFeatureAction", input, (data) => Boolean(data && typeof data === "object" && !Array.isArray(data)));
+      },
+    },
     onBridgeError(callback) {
       bridgeErrorCallbacks.add(callback);
       signalSubscription(nativeBridge.bridgeError, callback, subscriptions);
@@ -1136,6 +1141,24 @@ function signalSubscription(signal, callback, subscriptions) {
 }
 
 function createDemoConnection() {
+  const demoTaxonomy = { categories: [], tags: [{ id: "to-read", name: "待读", builtin: true }] };
+  const demoFeatures = {
+    async invoke(input) {
+      if (input.action === "modelState") return response({ modelId: "kokoro-v1.0-int8", status: "missing", jobId: "", error: null, totalBytes: 132303094, downloadedBytes: 0, progressPercent: 0, installedBytes: 0, directory: "桌面应用本地模型目录", message: "浏览器预览不下载模型。" });
+      if (input.action === "organizationState") return response(demoTaxonomy);
+      if (input.action === "statistics") return response({ today: { readingMs: 0, listeningMs: 0, overlapMs: 0, totalMs: 0 }, total: { readingMs: 0, listeningMs: 0, overlapMs: 0, totalMs: 0 }, days: [] });
+      if (input.action === "activity") return response({ accepted: true });
+      if (input.action === "organizationUpdate") {
+        const r = input.request;
+        if (r.action === "book") { const book = initialState.data.library.books.find((x) => x.id === r.bookId); if (book) { Object.assign(book, r.patch); if (r.patch.statusMode === "auto") book.readingStatus = book.progressPercent >= 100 ? "read" : book.progressPercent > 0 ? "reading" : "unread"; } }
+        else if (r.action === "create") demoTaxonomy[r.kind].push({ id: `demo-${Date.now()}`, name: r.name });
+        else if (r.action === "rename") { const term = demoTaxonomy[r.kind].find((x) => x.id === r.id); if (term) term.name = r.name; }
+        else if (r.action === "delete") { demoTaxonomy[r.kind] = demoTaxonomy[r.kind].filter((x) => x.id !== r.id); for (const book of initialState.data.library.books) { if(r.kind === "categories" && book.categoryId === r.id) book.categoryId = ""; if(r.kind === "tags") book.tagIds = (book.tagIds || []).filter(x=>x!==r.id); } }
+        return response(demoTaxonomy);
+      }
+      throw new BridgeProtocolError("请在桌面应用中使用此功能。", "FEATURE_DESKTOP_REQUIRED");
+    },
+  };
   const initialState = createDemoInitialState();
   const progressCallbacks = new Set();
   const finishedCallbacks = new Set();
@@ -1266,6 +1289,7 @@ function createDemoConnection() {
 
   return {
     mode: "demo",
+    features: demoFeatures,
     initialState,
     controls: NOOP_CONTROLS,
     app: {
