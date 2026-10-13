@@ -51,7 +51,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check -r requirements.txt -r build-requirements.txt
 
       - name: Run Python tests
-        run: python -m unittest discover -s tests -p "test_*.py"
+        run: python -u -X faulthandler -m unittest discover -s tests -p "test_*.py" -v
 
       - name: Build Windows packages
         run: python scripts/package_windows.py
