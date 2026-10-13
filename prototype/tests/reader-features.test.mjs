@@ -42,3 +42,41 @@ test("browser model management explains its desktop boundary and stats have no i
   assert.deepEqual(stats.days, []);
   c.dispose();
 });
+
+test("demo model variant is explicit and changes package metadata without downloading", async () => {
+  const c = await connectBridge();
+  try {
+    let state = (await c.features.invoke({ action: "modelState" })).data;
+    assert.equal(state.variant, "int8");
+    assert.equal(state.modelId, "kokoro-v1.0-int8");
+    assert.equal(state.totalBytes, 132303094);
+    state = (await c.features.invoke({ action: "modelVariant", variant: "fp32" })).data;
+    assert.equal(state.variant, "fp32");
+    assert.equal(state.modelId, "kokoro-v1.0-fp32");
+    assert.equal(state.totalBytes, 349906910);
+    assert.equal(state.status, "missing");
+    assert.equal(state.downloadedBytes, 0);
+    assert.equal(state.installedBytes, 0);
+    assert.equal((await c.features.invoke({ action: "modelState" })).data.variant, "fp32");
+    await assert.rejects(c.features.invoke({ action: "modelDownload" }), error => error.code === "FEATURE_DESKTOP_REQUIRED");
+    await assert.rejects(c.features.invoke({ action: "modelVariant", variant: "other" }), error => error.code === "MODEL_VARIANT_INVALID");
+    assert.equal((await c.features.invoke({ action: "modelState" })).data.variant, "fp32");
+    state = (await c.features.invoke({ action: "modelVariant", variant: "int8" })).data;
+    assert.equal(state.modelId, "kokoro-v1.0-int8");
+    assert.equal(state.totalBytes, 132303094);
+  } finally { c.dispose(); }
+});
+
+test("demo model variant waits for a stopped playback session", async () => {
+  const c = await connectBridge();
+  try {
+    const sessionId = (await c.floating.show()).data.sessionId;
+    for (const command of ["play", "pause"]) {
+      await c.reader.controlPlayback({ sessionId, command });
+      await assert.rejects(c.features.invoke({ action: "modelVariant", variant: "fp32" }), error => error.code === "MODEL_BUSY");
+      assert.equal((await c.features.invoke({ action: "modelState" })).data.variant, "int8");
+    }
+    await c.reader.controlPlayback({ sessionId, command: "stop" });
+    assert.equal((await c.features.invoke({ action: "modelVariant", variant: "fp32" })).data.variant, "fp32");
+  } finally { c.dispose(); }
+});

@@ -580,7 +580,8 @@ export interface BridgeConnection {
 
 export interface ShelfTerm { id: string; name: string; builtin?: boolean }
 export interface ModelState {
-  modelId: "kokoro-v1.0-int8";
+  modelId: "kokoro-v1.0-int8" | "kokoro-v1.0-fp32";
+  variant: "int8" | "fp32";
   status: "missing" | "downloading" | "verifying" | "extracting" | "loading" | "ready" | "error" | "cancelled";
   jobId: string; downloadedBytes: number; totalBytes: number; progressPercent: number;
   installedBytes: number; directory: string; message: string; error: BridgeError | null;
@@ -589,7 +590,7 @@ export interface ModelState {
 export interface TimeSummary { readingMs: number; listeningMs: number; overlapMs: number; totalMs: number }
 export interface StatisticsState { today: TimeSummary; total: TimeSummary; days: (TimeSummary & { date: string })[] }
 export type ReaderFeatureResult<T extends ReaderFeatureRequest> =
-  T["action"] extends "modelState" | "modelDownload" | "modelRetry" | "modelCancel" | "modelImport" | "modelDirectory" ? ModelState :
+  T["action"] extends "modelState" | "modelVariant" | "modelDownload" | "modelRetry" | "modelCancel" | "modelImport" | "modelDirectory" ? ModelState :
   T["action"] extends "statistics" ? StatisticsState :
   T["action"] extends "organizationState" | "organizationUpdate" ? { categories: ShelfTerm[]; tags: ShelfTerm[] } :
   T["action"] extends "updateNote" ? ReaderBookmark :
@@ -597,6 +598,7 @@ export type ReaderFeatureResult<T extends ReaderFeatureRequest> =
   T["action"] extends "previewVoice" ? ReaderPlaybackCommandData : { accepted: boolean };
 export type ReaderFeatureRequest =
   | { action: "modelState" | "modelDownload" | "modelRetry" | "modelCancel" | "modelImport" | "modelDirectory" | "organizationState" | "statistics" }
+  | { action: "modelVariant"; variant: "int8" | "fp32" }
   | { action: "previewVoice"; voiceId: string }
   | { action: "updateNote"; sessionId: string; bookmarkId: string; patch: { note?: string; color?: string } }
   | { action: "exportNotes"; sessionId: string; format: "md" | "txt" }

@@ -1222,6 +1222,10 @@ class DesktopBridge(QObject):
             from PySide6.QtWidgets import QFileDialog
             if action == "modelState":
                 data = {**self._kokoro.snapshot(), "playback": self._playback.snapshot()}
+            elif action == "modelVariant":
+                if self._playback.snapshot()["status"] in {"playing", "paused"}:
+                    raise FeatureError("MODEL_BUSY", "请先停止朗读，再切换模型版本。")
+                data = self._kokoro.set_variant(request.get("variant"))
             elif action in {"modelDownload", "modelRetry"}:
                 if self._playback.snapshot()["requestedBackend"] == "kokoro" and self._playback.snapshot()["status"] in {"playing", "paused"}:
                     raise FeatureError("MODEL_BUSY", "请先停止Kokoro朗读，再安装模型。")
@@ -1232,7 +1236,8 @@ class DesktopBridge(QObject):
                 snapshot = self._playback.snapshot()
                 if snapshot["status"] == "playing" or snapshot["requestedBackend"] == "kokoro" and snapshot["status"] == "paused":
                     raise FeatureError("MODEL_BUSY", "请先停止朗读，再导入模型。")
-                path, _ = QFileDialog.getOpenFileName(self._window, "导入官方Kokoro v1.0 INT8模型包", "", "模型包 (*.tar.bz2)")
+                version = "INT8" if self._kokoro.variant == "int8" else "普通版"
+                path, _ = QFileDialog.getOpenFileName(self._window, f"导入官方Kokoro v1.0 {version}模型包", "", "模型包 (*.tar.bz2)")
                 data = self._kokoro.start(path) if path else self._kokoro.snapshot()
             elif action == "modelDirectory":
                 if self._playback.snapshot()["status"] in {"playing", "paused"}:
@@ -1326,7 +1331,7 @@ class DesktopBridge(QObject):
             except queue.Empty:
                 break
             self.featuresChanged.emit(_json({"schemaVersion": SCHEMA_VERSION, "kind": kind, "data": state}))
-            if state["status"] in {"ready", "error", "cancelled"}:
+            if state["status"] in {"ready", "error", "cancelled", "missing"}:
                 self.speechPreferencesChanged.emit(_json({"schemaVersion": SCHEMA_VERSION, "state": self._speech_state()}))
         try:
             self._tick_activity()

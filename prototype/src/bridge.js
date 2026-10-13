@@ -1142,9 +1142,17 @@ function signalSubscription(signal, callback, subscriptions) {
 
 function createDemoConnection() {
   const demoTaxonomy = { categories: [], tags: [{ id: "to-read", name: "待读", builtin: true }] };
+  let demoModelVariant = "int8";
+  const demoModelState = () => ({ variant: demoModelVariant, modelId: `kokoro-v1.0-${demoModelVariant}`, status: "missing", jobId: "", error: null, totalBytes: demoModelVariant === "fp32" ? 349906910 : 132303094, downloadedBytes: 0, progressPercent: 0, installedBytes: 0, directory: "桌面应用本地模型目录", message: "浏览器预览不下载模型。", playback: demoPlaybackState });
   const demoFeatures = {
     async invoke(input) {
-      if (input.action === "modelState") return response({ modelId: "kokoro-v1.0-int8", status: "missing", jobId: "", error: null, totalBytes: 132303094, downloadedBytes: 0, progressPercent: 0, installedBytes: 0, directory: "桌面应用本地模型目录", message: "浏览器预览不下载模型。" });
+      if (input.action === "modelState") return response(demoModelState());
+      if (input.action === "modelVariant") {
+        if (!["int8", "fp32"].includes(input.variant)) throw new BridgeProtocolError("模型版本无效。", "MODEL_VARIANT_INVALID");
+        if (["playing", "paused"].includes(demoPlaybackState.status)) throw new BridgeProtocolError("请先停止朗读，再切换模型。", "MODEL_BUSY");
+        demoModelVariant = input.variant;
+        return response(demoModelState());
+      }
       if (input.action === "organizationState") return response(demoTaxonomy);
       if (input.action === "statistics") return response({ today: { readingMs: 0, listeningMs: 0, overlapMs: 0, totalMs: 0 }, total: { readingMs: 0, listeningMs: 0, overlapMs: 0, totalMs: 0 }, days: [] });
       if (input.action === "activity") return response({ accepted: true });

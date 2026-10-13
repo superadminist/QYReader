@@ -26,23 +26,38 @@ export function KokoroPanel({ features, voices, selectedVoice, onSelect }) {
   const [state, setState] = useState(null);
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const actionPending = useRef(false);
+  const modelRevision = useRef(0);
   useEffect(() => {
     if (!features) return;
     let alive = true;
-    const refresh = () => features.invoke({ action: "modelState" }).then((r) => { if (alive) setState(r.data); }).catch((e) => { if (alive) setError(e.message); });
+    const refresh = () => {
+      if (actionPending.current) return;
+      const revision = modelRevision.current;
+      features.invoke({ action: "modelState" }).then((r) => { if (alive && revision === modelRevision.current) setState(r.data); }).catch((e) => { if (alive && revision === modelRevision.current) setError(e.message); });
+    };
     refresh();
     const timer = setInterval(refresh, 1000);
     return () => { alive = false; clearInterval(timer); };
   }, [features]);
   const action = async (action, extra = {}) => {
+    if (actionPending.current) return;
+    actionPending.current = true;
+    modelRevision.current += 1;
     setPending(true); setError("");
     try { const r = await features.invoke({ action, ...extra }); if (action !== "previewVoice") setState(r.data); }
     catch (e) { setError(e.message); }
-    finally { setPending(false); }
+    finally { actionPending.current = false; setPending(false); }
   };
   const busy = ["downloading", "verifying", "extracting", "loading"].includes(state?.status);
+  const playbackActive = ["playing", "paused"].includes(state?.playback?.status);
+  const variant = state?.variant || "int8";
   const labels = { missing: "未安装", downloading: "正在下载", verifying: "正在校验", extracting: "正在解压", loading: "正在加载", ready: "已就绪 · 完全离线", error: "安装失败", cancelled: "已取消" };
-  return <section className="settings-section kokoro-panel"><h3>免费离线音色包</h3><p>Kokoro v1.0 INT8 · 一次下载约132.3 MB，升级保留模型。</p>
+  return <section className="settings-section kokoro-panel"><h3>免费离线音色包</h3>
+    <label className="settings-field"><span>模型版本</span><select aria-label="Kokoro模型版本" value={variant} disabled={!features || !state || busy || pending || playbackActive} onChange={(e) => action("modelVariant", { variant: e.target.value })}><option value="int8">INT8 · 132MB</option><option value="fp32">普通版 · 350MB</option></select></label>
+    <p>Kokoro v1.0 {variant === "fp32" ? "普通版" : "INT8"} · 一次下载约{((state?.totalBytes || (variant === "fp32" ? 349906910 : 132303094)) / 1000000).toFixed(1)} MB，升级保留模型。</p>
+    <p className="settings-hint">普通版在本机测试中生成更快，但需要更多磁盘和内存；不同电脑仍可能出现句间等待。切换模型保留原音色和已下载的模型。</p>
+    {playbackActive ? <p className="settings-hint">先停止朗读，再切换模型版本。</p> : null}
     <p role="status">{labels[state?.status] || "正在读取模型状态…"}{state?.installedBytes > 0 ? ` · 模型占用 ${(state.installedBytes / 1048576).toFixed(1)} MiB` : ""}</p>
     {busy ? <><progress max="100" value={state.progressPercent || 0} /><p>{(state.downloadedBytes / 1048576).toFixed(1)} / {(state.totalBytes / 1048576).toFixed(1)} MiB</p></> : null}
     <p className="settings-hint model-directory">{state?.directory}</p>

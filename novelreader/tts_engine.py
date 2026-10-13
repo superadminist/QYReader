@@ -1297,7 +1297,13 @@ class SpeechController:
         with self._cv:
             backend = self._backend
             if backend == "kokoro":
-                # Loading is lazy on the single synthesis worker; no second player.
+                # Reuse the synthesis worker to validate/load the model before
+                # Play. Warming must not synthesize book text or publish audio events.
+                if self._kokoro is not None:
+                    try:
+                        self._kokoro.preload()
+                    except Exception:
+                        LOGGER.debug("Kokoro preload unavailable", exc_info=True)
                 return
             if backend == "sapi":
                 self._warm_sapi_requested = True
@@ -1935,12 +1941,12 @@ class SpeechController:
 
     # ---------- 控制（GUI 线程调用） ----------
     def start(self, book, chapter_idx, char_offset):
-        if self._kokoro is not None:
-            self._kokoro.cancel_pending()
         self._ensure_thread()
         with self._cv:
             if self._closed:
                 raise RuntimeError("SpeechController 已关闭")
+            if self._kokoro is not None:
+                self._kokoro.cancel_pending()
             self._book = book
             self._audio_active = False
             self._ci = int(chapter_idx)
@@ -1968,9 +1974,9 @@ class SpeechController:
             return False
 
     def stop(self):
-        if self._kokoro is not None:
-            self._kokoro.cancel_pending()
         with self._cv:
+            if self._kokoro is not None:
+                self._kokoro.cancel_pending()
             self._book = None
             self._state = "idle"
             self._audio_active = False
@@ -1982,6 +1988,8 @@ class SpeechController:
     def shutdown(self, timeout=2.0):
         """有界停止朗读线程；SAPI/COM/MCI 的释放仍由工作线程完成。"""
         with self._cv:
+            if self._kokoro is not None:
+                self._kokoro.cancel_pending()
             self._closed = True
             self._book = None
             self._state = "idle"
@@ -2827,33 +2835,46 @@ class SpeechController:
         return self._speak_sapi(text, gen, start_event)
 
     def _speak_kokoro(self, text, gen, content, next_offset, start_event, book=None, chapter_index=0):
-        if self._kokoro is None:
-            raise RuntimeError("请先安装Kokoro离线音色包。")
-        future = self._kokoro.request(text, self._kokoro_voice, self._rate)
+        # Admission and generation changes share the same lock. A Stop/seek
+        # cannot cancel the queue and then have the old session refill it.
+        with self._cv:
+            if self._should_stop(gen):
+                return False
+            if self._kokoro is None:
+                raise RuntimeError("请先安装Kokoro离线音色包。")
+            service, voice, rate = self._kokoro, self._kokoro_voice, self._rate
+            future = service.request(text, voice, rate, priority=0)
         offset = next_offset
+        # Keep the bounded lookahead. It hides some latency but does not make
+        # inference that is slower than playback sustainable.
         for _ in range(3):
             following, end, _start = self._next_chunk(content, offset)
-            if not following and book is not None and chapter_index + 1 < len(book.chapters):
+            while not following and book is not None and chapter_index + 1 < len(book.chapters):
                 chapter_index += 1
                 content = book.chapters[chapter_index].tts_content()[0]
                 offset = 0
                 following, end, _start = self._next_chunk(content, offset)
-            if not following or self._should_stop(gen):
+            if not following:
                 break
-            self._kokoro.request(following, self._kokoro_voice, self._rate)
+            with self._cv:
+                if self._should_stop(gen):
+                    return False
+                service.request(following, voice, rate, priority=10)
             offset = end
         started = time.monotonic()
         buffering = False
         while not future.done():
             if self._should_stop(gen):
                 return False
-            if not buffering and time.monotonic() - started >= .3:
-                self._post({"type": "buffering"}, gen)
-                buffering = True
             with self._cv:
+                if self._should_stop(gen):
+                    return False
+                if self._state == "playing" and not buffering and time.monotonic() - started >= .3:
+                    self._post({"type": "buffering"}, gen)
+                    buffering = True
                 self._cv.wait(timeout=.05)
         with self._cv:
-            self._cv.wait_for(lambda: self._state != "paused" or self._gen != gen)
+            self._cv.wait_for(lambda: self._state != "paused" or self._should_stop(gen))
         if self._should_stop(gen):
             return False
         return self._speak_edge_play(future.result().read_bytes(), gen, start_event, backend="kokoro")

@@ -234,6 +234,34 @@ class ReaderFeaturesTests(unittest.TestCase):
         finally:
             bridge.shutdown()
 
+    def test_bridge_model_variant_updates_voice_availability_and_rejects_active_playback(self):
+        from PySide6.QtCore import QCoreApplication, QObject
+        from novelreader.qt_bridge import DesktopBridge
+        from novelreader.library_service import LibraryQueryService
+        app = QCoreApplication.instance() or QCoreApplication([])
+        with patch("novelreader.qt_bridge.SpeechController.list_voices", return_value=[]):
+            bridge = DesktopBridge(QObject(), library=LibraryQueryService(self.path), reader=ReaderService(self.path))
+        try:
+            updates = []
+            bridge.speechPreferencesChanged.connect(lambda raw: updates.append(json.loads(raw)))
+            request = json.dumps({"action": "modelVariant", "variant": "fp32"})
+            response = json.loads(bridge.readerFeatureAction(request))
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["data"]["variant"], "fp32")
+            self.assertEqual(response["data"]["status"], "missing")
+            bridge._drain_features()
+            self.assertTrue(updates)
+            voices = [v for v in updates[-1]["state"]["voices"] if v["backend"] == "kokoro"]
+            self.assertEqual(len(voices), 8)
+            self.assertFalse(any(v["available"] for v in voices))
+            for status in ("playing", "paused"):
+                with patch.object(bridge._playback, "snapshot", return_value={"status": status}):
+                    response = json.loads(bridge.readerFeatureAction(json.dumps({"action": "modelVariant", "variant": "int8"})))
+                self.assertEqual(response["error"]["code"], "MODEL_BUSY")
+                self.assertEqual(bridge._kokoro.variant, "fp32")
+        finally:
+            bridge.shutdown()
+
 
 class StatisticsTests(unittest.TestCase):
     def setUp(self):

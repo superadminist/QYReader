@@ -18,7 +18,9 @@ def main():
     args = parser.parse_args()
     import sherpa_onnx
     import psutil
-    result = {"model": "Kokoro v1.0 INT8", "runtime": sherpa_onnx.version, "provider": "cpu", "runs": []}
+    manifest_path = Path(args.model_dir) / "manifest.json"
+    metadata = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
+    result = {"model": metadata.get("modelId", "Kokoro v1.0 (unregistered model variant)"), "runtime": sherpa_onnx.version, "provider": "cpu", "runs": []}
     texts = ["今天是2026年10月11日。我们使用自己编写的文字，验证离线朗读、数字读法和句子停顿。", "静静翻开书页，午后的阳光落在窗边。阅读让每一天多一份发现。", "这是一段中英文测试。Hello QYReader, welcome to offline reading."]
     process = psutil.Process()
     # Fail any accidental Python-side network use. All model assets are local.
