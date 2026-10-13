@@ -14,6 +14,10 @@ Content library: import files, paste text, or extract web articles, then filter 
 
 ![QYReader content library with import options, filters, and recently read books](assets/screenshots/library.png)
 
+Reader: chapter navigation on the left, the main text area, typography settings at the top, and playback controls along the bottom.
+
+![QYReader main reading view with chapter navigation, text, font settings, and playback progress controls](assets/screenshots/reader.png)
+
 Floating reader: text-only view and view with playback controls visible.
 
 | Text-only view | Playback controls visible |
