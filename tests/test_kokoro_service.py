@@ -2,10 +2,11 @@
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
-import wave
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -220,13 +221,31 @@ class KokoroSchedulingTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows extended-path regression")
     def test_native_wav_writer_supports_long_cache_path(self):
-        self.service.cache = _cache_path(self.root / ("长路径" * 60) / "audio-cache")
-        self.service.engine = SimpleNamespace(generate=lambda *a, **k: SimpleNamespace(samples=[0.1] * 100, sample_rate=24000))
-        audio = self.service.request("长路径写入测试", VOICE, 200).result(2)
-        self.assertGreater(len(str(audio)), 260)
-        with wave.open(str(audio), "rb") as source:
-            self.assertEqual(source.getnframes(), 100)
-            self.assertEqual(source.getframerate(), 24000)
+        # Keep native extension initialization out of the shared Qt fixture
+        # process while exercising the real writer and production service.
+        script = """
+import sys, wave
+from pathlib import Path
+from types import SimpleNamespace
+from novelreader.kokoro_service import KokoroService, _cache_path
+service = KokoroService(Path(sys.argv[1]))
+service.state['status'] = 'ready'
+service.cache = _cache_path(Path(sys.argv[1]) / ('长路径' * 60) / 'audio-cache')
+service.engine = SimpleNamespace(generate=lambda *a, **k: SimpleNamespace(samples=[0.1] * 100, sample_rate=24000))
+try:
+    audio = service.request('长路径写入测试', 'kokoro:v1.0:zf_xiaobei', 200).result(5)
+    assert len(str(audio)) > 260
+    with wave.open(str(audio), 'rb') as source:
+        assert source.getnframes() == 100
+        assert source.getframerate() == 24000
+finally:
+    service.close()
+    service.executor.thread.join(2)
+"""
+        result = subprocess.run([sys.executable, "-B", "-X", "faulthandler", "-c", script, str(self.root)],
+                                cwd=Path(__file__).resolve().parents[1], text=True, encoding="utf-8", errors="replace",
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

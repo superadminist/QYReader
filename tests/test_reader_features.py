@@ -239,8 +239,9 @@ class ReaderFeaturesTests(unittest.TestCase):
         from novelreader.qt_bridge import DesktopBridge
         from novelreader.library_service import LibraryQueryService
         app = QCoreApplication.instance() or QCoreApplication([])
+        window = QObject()
         with patch("novelreader.qt_bridge.SpeechController.list_voices", return_value=[]):
-            bridge = DesktopBridge(QObject(), library=LibraryQueryService(self.path), reader=ReaderService(self.path))
+            bridge = DesktopBridge(window, library=LibraryQueryService(self.path), reader=ReaderService(self.path))
         try:
             updates = []
             bridge.speechPreferencesChanged.connect(lambda raw: updates.append(json.loads(raw)))

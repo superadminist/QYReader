@@ -491,7 +491,6 @@ class KokoroService:
             del self._synthesis_context.model
 
     def _generate(self, key, text, sid, rate):
-        import sherpa_onnx
         with self.lock:
             epoch, cache = getattr(self._synthesis_context, "model", (self.model_epoch, self.cache))
             if epoch != self.model_epoch:
@@ -505,6 +504,7 @@ class KokoroService:
         audio = engine.generate(text, sid=sid, speed=max(.4, min(2., rate / 200)))
         if not len(audio.samples):
             raise FeatureError("KOKORO_EMPTY_AUDIO", "该句未生成音频，请重试。", True)
+        import sherpa_onnx
         temporary = path.with_suffix(".tmp.wav")
         if not sherpa_onnx.write_wave(str(temporary), audio.samples, audio.sample_rate):
             raise FeatureError("KOKORO_WRITE_FAILED", "无法写入离线音频，请检查缓存目录的权限和磁盘空间。", True)

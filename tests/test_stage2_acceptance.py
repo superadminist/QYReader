@@ -180,8 +180,8 @@ class Stage2AcceptanceTests(unittest.TestCase):
         return QSignalSpy(self._require_signal("importProgress"))
 
     def _wait_finished(self, spy: QSignalSpy, timeout_ms: int = 15_000):
-        # Pump the normal application event loop. QSignalSpy.wait() creates a
-        # nested native wait that crashes in the Windows CI Qt configuration.
+        # Observe the real signal while pumping the normal application event
+        # loop, with an explicit bound and no additional nested native wait.
         deadline = time.monotonic() + timeout_ms / 1000
         while spy.count() == 0 and time.monotonic() < deadline:
             self.app.processEvents()
