@@ -110,6 +110,7 @@ class DesktopBridgeTests(unittest.TestCase):
             importer=LibraryImportService(FakeLibrary.path),
             file_picker=lambda: [os.fspath(self.source)],
         )
+        self.addCleanup(self.bridge.shutdown)
 
     def test_initial_state_uses_schema_v2_and_current_capabilities(self):
         payload = json.loads(self.bridge.getInitialState())

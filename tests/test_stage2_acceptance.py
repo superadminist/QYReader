@@ -119,6 +119,7 @@ class Stage2AcceptanceTests(unittest.TestCase):
         )
 
     def tearDown(self):
+        self.bridge.shutdown()
         self.env.stop()
         self.temp.cleanup()
 
@@ -179,8 +180,14 @@ class Stage2AcceptanceTests(unittest.TestCase):
         return QSignalSpy(self._require_signal("importProgress"))
 
     def _wait_finished(self, spy: QSignalSpy, timeout_ms: int = 15_000):
-        if spy.count() == 0:
-            self.assertTrue(spy.wait(timeout_ms), "Timed out waiting for importFinished")
+        # Pump the normal application event loop. QSignalSpy.wait() creates a
+        # nested native wait that crashes in the Windows CI Qt configuration.
+        deadline = time.monotonic() + timeout_ms / 1000
+        while spy.count() == 0 and time.monotonic() < deadline:
+            self.app.processEvents()
+            if spy.count() == 0:
+                time.sleep(0.01)
+        self.assertGreater(spy.count(), 0, "Timed out waiting for importFinished")
         raw = spy.at(spy.count() - 1)[0]
         self.assertIsInstance(raw, str)
         event = json.loads(raw)
