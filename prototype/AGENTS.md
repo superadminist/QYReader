@@ -10,6 +10,8 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 ## Confirmed design direction
 
+- Text-selection actions use a compact floating toolbar beside the selection, outside the document flow. Use distinct color dots with Chinese accessible labels, a separate write-note action and a separated read action. Clicking an existing underline opens its note for recoloring, editing or removal; preserve the current theme and shared playback position. Show confirmed save feedback and keep failed input available to retry.
+
 - The Kokoro, annotations, statistics, and library organization additions must preserve the existing UI style, themes, typography, radii, icons and spacing. Reuse existing settings, sidebar, card menus and modal patterns; do not redesign the main or floating surfaces.
 
 - Content-library import cards are ordered left to right: 导入文件, 粘贴文本, 网页链接, 播客 / 音频.

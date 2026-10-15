@@ -26,11 +26,11 @@ Floating reader: text-only view and view with playback controls visible.
 
 ## Current features
 
-### v2.1.9
+### v2.2.0
 
 - Free offline text-to-speech: download or manually import the official **Kokoro v1.0 INT8 / standard FP32** model packages in Settings. Both variants offer the same eight Chinese voices: 晓北, 晓妮, 晓晓, 晓伊, 云健, 云希, 云夏, and 云扬. Open Settings → Read Aloud & Floating Reader (朗读与悬浮) → Free Offline Voice Pack (免费离线音色包) → Model Version (模型版本). Stop playback before selecting and installing another variant. FP32 requires about 350 MB to download; INT8 requires about 132 MB. Switching preserves installed models and the selected voice. Generation speed depends on your computer. Edge and SAPI remain available through the shared `SpeechController` / `PlaybackService`. Slow generation displays a waiting state without automatically switching voices.
 - Offline generation scheduling: the selected model warms up in the background. Current playback and voice previews take priority over prefetching, and cached audio is immediately available. Stopping, seeking, and switching models isolate stale tasks. Incremental cache accounting and Windows long-path support reduce queueing and repeated disk scans.
-- Highlights and notes: select text to choose a highlight color, add a note, or set the starting position for reading aloud. The bookmark panel supports editing, deletion, navigation, and Markdown / TXT export. Existing bookmarks are preserved. Positions use Unicode code points, so changing font size or line spacing does not change anchors.
+- Highlights and notes: select text to open a compact toolbar beside the selection, then click one of four color dots to highlight, choose Write Note (写笔记) for a lightweight editor, or choose Read from selection (朗读). The toolbar does not shift the text. Click an existing highlight to view its note, change its color, edit, or delete it. A successful save clears the blue text selection and shows feedback; pending saves prevent duplicate submissions. The bookmark panel retains navigation and Markdown / TXT export. Existing bookmarks are preserved. Positions use Unicode code points, so changing font size or line spacing does not change anchors.
 - Reading statistics: the main and floating windows share local statistics, including today's time, total time, and a one-year heatmap. Reading counts while the text is visible in the foreground and there has been activity within five minutes. Listening counts actual playback, including background playback; generation, buffering, pauses, and voice previews do not count. Total time excludes overlap between reading and listening. Statistics start at zero when no historical data exists.
 - Library organization: content types (novels / articles / reference material), one category per item, multiple tags, and unread / reading / finished filters. Read Later (待读) is a built-in tag. Actual use marks an item as reading, and 100% progress marks it as finished; you can also lock its status manually. Reimporting preserves progress, bookmarks, and unknown fields.
 
@@ -52,13 +52,15 @@ The following entries are currently unavailable and do not create placeholder co
 
 Dedicated pages from the legacy Tk interface, including whole-book audio cache management, are not exposed in the 2.x React interface. Underlying data and cache formats remain compatible; the presence of backend code does not establish that a feature is available in the current UI.
 
+Sleep timers, chapter audio preparation and cache management, a unified voice center, backup and restore, and bulk library actions are covered by the [next optimization plan](docs/next-optimizations-plan.md) (Chinese). They will be implemented in a separate chat, starting with sleep timers, and are not included in v2.2.0.
+
 ## Recent updates
 
 | Version | Main changes |
 | --- | --- |
+| [v2.2.0](release-notes/v2.2.0.md) | Moves highlights and notes into a compact toolbar beside the selection, with four color dots and direct editing of existing highlights, preserving the current interface style and data. |
 | [v2.1.9](release-notes/v2.1.9.md) | Adds the optional Kokoro FP32 model for faster offline generation; improves warm-up, scheduling, and caching while preserving INT8, all eight voices, and existing data. |
 | [v2.1.8](release-notes/v2.1.8.md) | Adds optional Kokoro offline voices, highlights and notes, reading statistics, categories, and tags using the existing interface style. |
-| [v2.1.7](release-notes/v2.1.7.md) | Adjusts Windows transparent-window compositing to address white flashes in the content library while retaining rounded corners and hover animations. |
 
 Only the latest three versions appear here. See the [full changelog](CHANGELOG.md) or [GitHub Releases](https://github.com/superadminist/QYReader/releases) for older versions. Detailed release notes and the changelog are currently in Chinese. Each release must add `release-notes/vX.Y.Z.md` to provide readable GitHub Release notes.
 
@@ -109,6 +111,7 @@ Upgrading preserves the installation's `data` directory, and uninstalling keeps 
 4. Open the independent floating reader using Floating Reader (悬浮朗读) or `Ctrl+Shift+F`. Closing it does not stop playback; it remains available when the main window is minimized.
 5. Toggle fullscreen with `F11` or `Alt+Enter`.
 6. If offline generation is slow, stop playback and open Settings → Read Aloud & Floating Reader → Free Offline Voice Pack → Model Version. Select FP32 and download or import its approximately 350 MB package. You do not need to delete the existing INT8 model.
+7. Select text and click a color dot on the nearby toolbar to highlight it, or choose Write Note (写笔记) to enter and save a note. Click an existing highlight to view, recolor, edit, or delete its note.
 
 ## Development
 
@@ -215,7 +218,7 @@ For manual packaging, build the frontend, install packaging dependencies, and ru
 .venv\Scripts\python.exe -m PyInstaller --clean --noconfirm "QYReader.spec"
 ```
 
-The current version's installer path is `dist\installer\QYReader-Setup-2.1.9.exe`. The installer lets you choose the location and whether to create a desktop shortcut. It defaults to `Program Files\QYReader` and requests administrator privileges when launched. Before release, validate installation, first-launch data migration, upgrading, and data retention after uninstalling. Check WebEngine resources, importing/reading, exit cleanup, and the absence of Node, Vite development servers, or an external Python interpreter in the process tree. A successful build alone does not establish desktop validation.
+The current version's installer path is `dist\installer\QYReader-Setup-2.2.0.exe`. The installer lets you choose the location and whether to create a desktop shortcut. It defaults to `Program Files\QYReader` and requests administrator privileges when launched. Before release, validate installation, first-launch data migration, upgrading, and data retention after uninstalling. Check WebEngine resources, importing/reading, exit cleanup, and the absence of Node, Vite development servers, or an external Python interpreter in the process tree. A successful build alone does not establish desktop validation.
 
 Pushing to `main` triggers the GitHub Actions `Windows installer` workflow, which runs tests and packaging on a Windows runner. The installer and `SHA256SUMS.txt` are retained as build artifacts for 30 days. You can also trigger the workflow manually from GitHub Actions. Generated binaries are not committed to Git.
 

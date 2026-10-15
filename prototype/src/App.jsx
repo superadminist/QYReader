@@ -32,8 +32,9 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { connectBridge } from "./bridge.js";
-import { ActivityReporter, BookOrganizer, KokoroPanel, NOTE_COLORS, NOTE_COLOR_NAMES, NoteEditor, ShelfFilters, StatisticsView, STATUS_NAMES } from "./ReaderFeatures.jsx";
+import { ActivityReporter, BookOrganizer, KokoroPanel, NOTE_COLORS, NoteEditor, ShelfFilters, StatisticsView, STATUS_NAMES } from "./ReaderFeatures.jsx";
 import { readerSelectionFromRange } from "./readerPosition.js";
+import AnnotationPopover from "./AnnotationPopover.jsx";
 import { floatingLyricTransition, floatingSentenceIdentity } from "./floatingLyrics.js";
 import {
   floatingFontWheelChange,
@@ -233,11 +234,19 @@ function readerReducer(state, action) {
     case "SEARCH_ERROR":
       return { ...state, search: { ...state.search, status: "error", page: null, error: action.error } };
     case "BOOKMARKS_LOADING":
-      return { ...state, bookmarks: { status: "loading", page: null, error: "" } };
+      return { ...state, bookmarks: { ...state.bookmarks, status: "loading", error: "" } };
     case "BOOKMARKS":
       return { ...state, bookmarks: { status: "ready", page: action.page, error: "" } };
     case "BOOKMARKS_ERROR":
-      return { ...state, bookmarks: { status: "error", page: null, error: action.error } };
+      return { ...state, bookmarks: { ...state.bookmarks, status: "error", error: action.error } };
+    case "BOOKMARK_SAVED": {
+      const items = [...(state.bookmarks.page?.items || []).filter((item) => item.id !== action.bookmark.id), action.bookmark];
+      return { ...state, bookmarks: { status: "ready", error: "", page: { items, total: items.length, nextCursor: "" } } };
+    }
+    case "BOOKMARK_REMOVED": {
+      const items = (state.bookmarks.page?.items || []).filter((item) => item.id !== action.id);
+      return { ...state, bookmarks: { status: "ready", error: "", page: { items, total: items.length, nextCursor: "" } } };
+    }
     default:
       return state;
   }
@@ -1265,7 +1274,7 @@ const ReaderTextBlockView = memo(function ReaderTextBlockView({ block, highlight
   const decorated = boundaries.slice(0, -1).map((from, index) => {
     const to = boundaries[index + 1];
     const note = notes.filter((item) => item.startOffset < block.startOffset + to && item.endOffset > block.startOffset + from).sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt))[0];
-    return <span key={from} className={note ? "reader-annotation" : undefined} style={note ? { textDecorationColor: NOTE_COLORS[note.color] || NOTE_COLORS.yellow } : undefined} title={note?.note || undefined}>{textRange(from, to, hasHighlight && from >= start && to <= end)}</span>;
+    return <span key={from} className={note ? "reader-annotation" : undefined} data-annotation-id={note?.id} role={note ? "button" : undefined} tabIndex={note ? 0 : undefined} aria-label={note ? `查看笔记：${note.text}` : undefined} style={note ? { textDecorationColor: NOTE_COLORS[note.color] || NOTE_COLORS.yellow } : undefined} title={note ? "点击查看或编辑划线笔记" : undefined}>{textRange(from, to, hasHighlight && from >= start && to <= end)}</span>;
   });
   return (
     <p className={className} style={style} data-reader-block data-start-offset={block.startOffset}>
@@ -1277,18 +1286,32 @@ const ReaderTextBlockView = memo(function ReaderTextBlockView({ block, highlight
 });
 
 const ReaderCopyView = memo(function ReaderCopyView({ blocks, sentenceStart, sentenceEnd, readerStart, chapterIndex, onChooseStart, onSelection, annotations, paragraphMode, firstLineIndent }) {
-  const handlePointerUp = (event) => {
-    if (event.target.closest("button")) return;
+  const openAnnotation = (element, keyboardOpened = false) => {
+    const note = annotations.find((item) => item.id === element?.dataset.annotationId);
+    if (!note) return false;
+    const range = element.ownerDocument.createRange();
+    range.selectNodeContents(element);
+    onSelection({ ...note, anchorRange: range, keyboardOpened, triggerElement: element });
+    return true;
+  };
+  const selectText = (root) => {
     const selection = window.getSelection();
-    if (selection && !selection.isCollapsed && selection.rangeCount) {
-      const selected = readerSelectionFromRange(event.currentTarget, selection.getRangeAt(0), chapterIndex);
-      if (selected) { onSelection(selected); return; }
-    }
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
+    const range = selection.getRangeAt(0);
+    const selected = readerSelectionFromRange(root, range, chapterIndex);
+    if (!selected) return false;
+    onSelection({ ...selected, anchorRange: range.cloneRange() });
+    return true;
+  };
+  const handlePointerUp = (event) => {
+    if (event.button !== 0 || event.target.closest("button")) return;
+    if (selectText(event.currentTarget)) return;
+    if (openAnnotation(event.target.closest("[data-annotation-id]"))) return;
     onSelection(null);
     const target = readerPositionFromPointer(event.currentTarget, event, chapterIndex);
     if (target) onChooseStart(target);
   };
-  return <div className="reading-copy" onPointerUp={handlePointerUp} title="单击可选择朗读起点；选中文字可划线、备注或从这里朗读">{blocks.map((block, index) => {
+  return <div className="reading-copy" onPointerUp={handlePointerUp} onKeyUp={(event) => { if (event.shiftKey) selectText(event.currentTarget); }} onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && event.target.closest("[data-annotation-id]")) { event.preventDefault(); event.stopPropagation(); openAnnotation(event.target.closest("[data-annotation-id]"), true); } }} title="单击可选择朗读起点；选中文字可划线或写笔记；点击已有划线可编辑">{blocks.map((block, index) => {
     const overlaps = sentenceStart !== null && sentenceEnd > block.startOffset && sentenceStart < block.endOffset;
     const highlightStart = overlaps ? Math.max(sentenceStart, block.startOffset) : null;
     const highlightEnd = overlaps ? Math.min(sentenceEnd, block.endOffset) : null;
@@ -1375,16 +1398,50 @@ function NativePlayer({ playback, chapterTitle, pendingCommand, selectedStart, o
   );
 }
 
-function NativeReader({ state, networkNotice, selectedStart, onChooseStart, onBack, onNavigate, onGetWindow, onUpdatePosition, onSearch, onLoadBookmarks, onAddBookmark, onRemoveBookmark, onCommand, onSettings, floatingAvailable, floatingVisible, onFloatingToggle, onOpenSettings, features }) {
+export function NativeReader({ state, networkNotice, selectedStart, onChooseStart, onBack, onNavigate, onGetWindow, onUpdatePosition, onSearch, onLoadBookmarks, onAddBookmark, onRemoveBookmark, onBookmarkSaved, onCommand, onSettings, floatingAvailable, floatingVisible, onFloatingToggle, onOpenSettings, features }) {
   const [selection, setSelection] = useState(null);
   const [editingNote, setEditingNote] = useState(null);
   const [noteActionError, setNoteActionError] = useState("");
+  const [noteFeedback, setNoteFeedback] = useState("");
+  const noteSessionRef = useRef(state.data?.sessionId);
+  noteSessionRef.current = state.data?.sessionId;
+  const selectionRef = useRef(null);
+  const selectionSequence = useRef(0);
+  const annotationLockedRef = useRef(false);
+  const lockAnnotation = useCallback((locked) => { annotationLockedRef.current = locked; }, []);
+  const chooseAnnotation = useCallback((value) => {
+    if (annotationLockedRef.current) return;
+    const next = value ? { ...value, selectionToken: ++selectionSequence.current } : null;
+    selectionRef.current = next; setSelection(next);
+  }, []);
+  const closeSelection = useCallback((restoreFocus = false) => {
+    const previous = selectionRef.current;
+    selectionRef.current = null; setSelection(null);
+    if (restoreFocus === true && previous?.keyboardOpened) previous.triggerElement?.focus({ preventScroll: true });
+  }, []);
   const activeAnnotations = useMemo(() => (state.bookmarks.page?.items || []).filter((note) => note.chapterIndex === state.data?.window?.chapterIndex), [state.bookmarks.page?.items, state.data?.window?.chapterIndex]);
-  useEffect(() => { setSelection(null); onLoadBookmarks(); }, [state.data?.sessionId]);
+  useEffect(() => { closeSelection(); setEditingNote(null); setNoteFeedback(""); onLoadBookmarks(); }, [state.data?.sessionId]);
+  useEffect(() => { closeSelection(); }, [state.data?.window?.chapterIndex, state.data?.window?.windowStartOffset]);
+  useEffect(() => { if (!noteFeedback) return; const timer = window.setTimeout(() => setNoteFeedback(""), 2400); return () => window.clearTimeout(timer); }, [noteFeedback]);
   const saveNote = async (note) => {
-    if (note.id) await features.invoke({ action: "updateNote", sessionId: state.data.sessionId, bookmarkId: note.id, patch: { note: note.note, color: note.color } });
+    const sessionId = state.data.sessionId;
+    if (note.id) {
+      const response = await features.invoke({ action: "updateNote", sessionId, bookmarkId: note.id, patch: { note: note.note, color: note.color } });
+      if (noteSessionRef.current !== sessionId) return;
+      if (onBookmarkSaved) onBookmarkSaved(response.data); else await onLoadBookmarks();
+    }
     else await onAddBookmark(note);
-    await onLoadBookmarks(); setSelection(null);
+    if (noteSessionRef.current !== sessionId) return;
+    if (note.selectionToken === selectionRef.current?.selectionToken) { window.getSelection()?.removeAllRanges(); closeSelection(true); }
+    setNoteActionError(""); setNoteFeedback(note.id ? "笔记已更新" : note.note ? "笔记已保存" : "划线已保存");
+  };
+  const removeNote = async (id) => {
+    const sessionId = state.data.sessionId;
+    const selectionToken = selectionRef.current?.selectionToken;
+    await onRemoveBookmark(id);
+    if (noteSessionRef.current !== sessionId) return;
+    if (selectionToken === selectionRef.current?.selectionToken) { window.getSelection()?.removeAllRanges(); closeSelection(true); }
+    setNoteActionError(""); setNoteFeedback("划线与笔记已删除");
   };
   const exportNotes = async (format) => { try { await features.invoke({ action: "exportNotes", sessionId: state.data.sessionId, format }); setNoteActionError(""); } catch (e) { setNoteActionError(e.message); } };
   const [panelMode, setPanelMode] = useState("toc");
@@ -1393,6 +1450,7 @@ function NativeReader({ state, networkNotice, selectedStart, onChooseStart, onBa
   const readingSheetRef = useRef(null);
   const locateRequestedRef = useRef("");
   const navigate = useCallback((target) => {
+    closeSelection();
     window.clearTimeout(scrollTimerRef.current);
     scrollTimerRef.current = null;
     locateRequestedRef.current = "";
@@ -1481,20 +1539,21 @@ function NativeReader({ state, networkNotice, selectedStart, onChooseStart, onBa
           <div className="toc-title"><span>{panelMode === "toc" ? "目录" : panelMode === "search" ? "书内搜索" : "书签与笔记"}</span><small>{panelMode === "toc" ? `${data.book.chapters.length} 章` : ""}</small></div>
           {panelMode === "toc" ? <ChapterDirectory chapters={data.book.chapters} selectedIndex={data.position.chapterIndex} onNavigate={navigate} /> : null}
           {panelMode === "search" ? <div className="reader-side-content"><form onSubmit={submitSearch}><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入关键词后回车" /><button className="primary-button" type="submit">搜索</button></form>{state.search.status === "loading" ? <p>正在搜索真实正文…</p> : null}{state.search.error ? <p className="reader-side-error">{state.search.error}</p> : null}{state.search.page?.results.map((result) => <button key={result.id} className="reader-side-result" onClick={() => navigate({ kind: "position", chapterIndex: result.chapterIndex, charOffset: result.startOffset })}><strong>{result.chapterTitle}</strong><span>{result.excerpt}</span></button>)}{state.search.status === "ready" && state.search.page?.total === 0 ? <p>没有匹配内容</p> : null}</div> : null}
-          {panelMode === "bookmarks" ? <div className="reader-side-content">{playback.sentence ? <button className="primary-button bookmark-current" onClick={() => onAddBookmark(playback.sentence)}>收藏当前句</button> : <p>开始朗读后可收藏当前句。</p>}<div className="feature-actions"><button className="secondary-button" onClick={() => exportNotes("md")}>导出Markdown</button><button className="secondary-button" onClick={() => exportNotes("txt")}>导出TXT</button></div>{state.bookmarks.status === "loading" ? <p>正在读取书签…</p> : null}{state.bookmarks.error ? <p className="reader-side-error">{state.bookmarks.error}</p> : null}{state.bookmarks.page?.items.map((bookmark) => <div key={bookmark.id} className="reader-bookmark"><button disabled={bookmark.locationValid === false} onClick={() => navigate({ kind: "position", chapterIndex: bookmark.chapterIndex, charOffset: bookmark.startOffset })}><strong>{bookmark.chapterTitle}</strong><span>{bookmark.text}</span></button><p className="bookmark-note">{bookmark.note}</p>{bookmark.locationValid === false ? <small>定位失效，请核对正文</small> : null}<button aria-label={`编辑笔记 ${bookmark.text}`} onClick={() => setEditingNote(bookmark)}>编辑</button><button aria-label={`删除书签 ${bookmark.text}`} onClick={() => onRemoveBookmark(bookmark.id)}><X /></button></div>)}{state.bookmarks.status === "ready" && state.bookmarks.page?.total === 0 ? <p>暂无书签</p> : null}</div> : null}
+          {panelMode === "bookmarks" ? <div className="reader-side-content">{playback.sentence ? <button className="primary-button bookmark-current" onClick={() => onAddBookmark(playback.sentence)}>收藏当前句</button> : <p>开始朗读后可收藏当前句。</p>}<div className="feature-actions"><button className="secondary-button" onClick={() => exportNotes("md")}>导出Markdown</button><button className="secondary-button" onClick={() => exportNotes("txt")}>导出TXT</button></div>{state.bookmarks.status === "loading" ? <p>正在读取书签…</p> : null}{state.bookmarks.error ? <p className="reader-side-error">{state.bookmarks.error}</p> : null}{state.bookmarks.page?.items.map((bookmark) => <div key={bookmark.id} className="reader-bookmark"><button disabled={bookmark.locationValid === false} onClick={() => navigate({ kind: "position", chapterIndex: bookmark.chapterIndex, charOffset: bookmark.startOffset })}><strong>{bookmark.chapterTitle}</strong><span>{bookmark.text}</span></button><p className="bookmark-note">{bookmark.note}</p>{bookmark.locationValid === false ? <small>定位失效，请核对正文</small> : null}<button aria-label={`编辑笔记 ${bookmark.text}`} onClick={() => setEditingNote(bookmark)}>编辑</button><button aria-label={`删除书签 ${bookmark.text}`} onClick={() => onRemoveBookmark(bookmark.id).catch((e) => setNoteActionError(e.message))}><X /></button></div>)}{state.bookmarks.status === "ready" && state.bookmarks.page?.total === 0 ? <p>暂无书签</p> : null}</div> : null}
           <div className="toc-footer"><UploadSimple /> 已同步阅读进度</div>
         </aside>
         <article ref={readingSheetRef} className={`reading-sheet paragraph-mode-${data.settings.paragraphMode}`} style={{ "--reading-size": `${data.settings.fontSize}px`, "--reading-line-height": data.settings.lineSpacing, fontFamily: data.settings.fontFamily }} onScroll={handleScroll}>
           <p className="chapter-index">CHAPTER {String(windowData.chapterIndex + 1).padStart(2, "0")}</p><h1>{windowData.chapterTitle}</h1><div className="title-rule" />
           {state.windowLoading ? <div className="reader-window-loading">正在加载正文窗口…</div> : null}
           {windowData.hasBefore ? <button className="window-load-button" onClick={() => onGetWindow(windowData.chapterIndex, windowData.windowStartOffset)}>加载前文</button> : null}
-          {selection ? <div className="selection-toolbar" role="toolbar" aria-label="选中文字操作"><button className="secondary-button" onClick={() => setEditingNote({ ...selection, kind: "annotation" })}>划线与备注</button>{Object.entries(NOTE_COLORS).map(([color, hex]) => <button key={color} aria-label={`添加${NOTE_COLOR_NAMES[color]}划线`} style={{ borderBottom: `3px solid ${hex}` }} onClick={() => saveNote({ ...selection, kind: "annotation", color, note: "" }).catch((e) => setNoteActionError(e.message))}>划线</button>)}<button className="secondary-button" onClick={() => { onChooseStart({ kind: "position", chapterIndex: selection.chapterIndex, charOffset: selection.startOffset }); setSelection(null); onCommand("play"); }}>从这里朗读</button></div> : null}
-          <ReaderCopyView onSelection={setSelection} annotations={activeAnnotations} blocks={windowData.blocks} sentenceStart={sentence?.startOffset ?? null} sentenceEnd={sentence?.endOffset ?? null} readerStart={selectedStart?.chapterIndex === windowData.chapterIndex ? selectedStart.charOffset : null} chapterIndex={windowData.chapterIndex} onChooseStart={onChooseStart} paragraphMode={data.settings.paragraphMode} firstLineIndent={data.settings.firstLineIndent} />
+          <ReaderCopyView onSelection={chooseAnnotation} annotations={activeAnnotations} blocks={windowData.blocks} sentenceStart={sentence?.startOffset ?? null} sentenceEnd={sentence?.endOffset ?? null} readerStart={selectedStart?.chapterIndex === windowData.chapterIndex ? selectedStart.charOffset : null} chapterIndex={windowData.chapterIndex} onChooseStart={onChooseStart} paragraphMode={data.settings.paragraphMode} firstLineIndent={data.settings.firstLineIndent} />
           {windowData.hasAfter ? <button className="window-load-button" onClick={() => onGetWindow(windowData.chapterIndex, windowData.windowEndOffset)}>加载后文</button> : null}
           <div className="page-count">{data.position.progressPercent.toFixed(1)}%</div>
         </article>
       </div>
       <NativePlayer playback={playback} chapterTitle={chapterTitle} pendingCommand={state.pendingCommand} selectedStart={selectedStart} onCommand={onCommand} onNavigate={navigate} onSettings={onSettings} onLocate={locateCurrentSentence} settings={data.settings} networkNotice={networkNotice} />
+      {selection ? <AnnotationPopover key={`${data.sessionId}:${selection.selectionToken}`} selection={selection} sheetRef={readingSheetRef} onSave={saveNote} onRemove={removeNote} onClose={closeSelection} onInteractionLockChange={lockAnnotation} onRead={(target) => { onChooseStart({ kind: "position", chapterIndex: target.chapterIndex, charOffset: target.startOffset }); window.getSelection()?.removeAllRanges(); closeSelection(); onCommand("play"); }} /> : null}
+      {noteFeedback ? <div className="annotation-feedback" role="status">{noteFeedback}</div> : null}
       {noteActionError ? <p className="reader-side-error" role="alert">{noteActionError}</p> : null}
       {editingNote ? <NoteEditor value={editingNote} onSave={saveNote} onClose={() => setEditingNote(null)} /> : null}
     </section>
@@ -2184,10 +2243,10 @@ function MainApplication() {
   const addReaderBookmark = async (sentence) => {
     const connection = connectionRef.current;
     const sessionId = readerSessionRef.current;
-    if (!connection || !sessionId) return;
+    if (!connection || !sessionId) throw new Error("阅读会话已关闭，请重新打开书籍。");
     try {
-      await connection.reader.addBookmark({ sessionId, chapterIndex: sentence.chapterIndex, startOffset: sentence.startOffset, endOffset: sentence.endOffset, note: sentence.note || "", ...(sentence.kind ? { kind: sentence.kind, color: sentence.color || "yellow" } : {}) });
-      await loadReaderBookmarks();
+      const response = await connection.reader.addBookmark({ sessionId, chapterIndex: sentence.chapterIndex, startOffset: sentence.startOffset, endOffset: sentence.endOffset, note: sentence.note || "", ...(sentence.kind ? { kind: sentence.kind, color: sentence.color || "yellow" } : {}) });
+      if (sessionId === readerSessionRef.current) dispatchReader({ type: "BOOKMARK_SAVED", bookmark: response.data });
     } catch (error) {
       dispatchReader({ type: "BOOKMARKS_ERROR", error: error.message || "书签添加失败。" });
       if (sentence.kind) throw error;
@@ -2196,12 +2255,13 @@ function MainApplication() {
   const removeReaderBookmark = async (bookmarkId) => {
     const connection = connectionRef.current;
     const sessionId = readerSessionRef.current;
-    if (!connection || !sessionId) return;
+    if (!connection || !sessionId) throw new Error("阅读会话已关闭，请重新打开书籍。");
     try {
       await connection.reader.removeBookmark({ sessionId, bookmarkId });
-      await loadReaderBookmarks();
+      if (sessionId === readerSessionRef.current) dispatchReader({ type: "BOOKMARK_REMOVED", id: bookmarkId });
     } catch (error) {
       dispatchReader({ type: "BOOKMARKS_ERROR", error: error.message || "书签删除失败。" });
+      throw error;
     }
   };
   const controlReaderPlayback = async (command) => {
@@ -2472,7 +2532,7 @@ function MainApplication() {
             {page === "statistics" ? <StatisticsView features={connectionRef.current?.features} /> : page === "reader" && bridgeMode === "demo"
               ? <DemoReader setPage={setPage} fontSize={fontSize} setFontSize={setFontSize} playing={playing} setPlaying={setPlaying} floating={floating} setFloating={setFloating} networkNotice={networkNotice} />
               : page === "reader" && bridgeMode === "native"
-                ? <NativeReader features={connectionRef.current?.features} state={readerState} networkNotice={networkNotice} selectedStart={selectedReaderStart} onChooseStart={chooseReaderStart} onBack={() => setPage("library")} onNavigate={navigateReader} onGetWindow={getReaderWindow} onUpdatePosition={updateReaderPosition} onSearch={searchReader} onLoadBookmarks={loadReaderBookmarks} onAddBookmark={addReaderBookmark} onRemoveBookmark={removeReaderBookmark} onCommand={controlReaderPlayback} onSettings={updateReaderSettings} floatingAvailable={capabilities.floatingReader} floatingVisible={Boolean(nativeFloatingState?.visible)} onFloatingToggle={switchToFloatingReader} onOpenSettings={() => setSettingsOpen(true)} />
+                ? <NativeReader features={connectionRef.current?.features} state={readerState} networkNotice={networkNotice} selectedStart={selectedReaderStart} onChooseStart={chooseReaderStart} onBack={() => setPage("library")} onNavigate={navigateReader} onGetWindow={getReaderWindow} onUpdatePosition={updateReaderPosition} onSearch={searchReader} onLoadBookmarks={loadReaderBookmarks} onAddBookmark={addReaderBookmark} onRemoveBookmark={removeReaderBookmark} onBookmarkSaved={(bookmark) => dispatchReader({ type: "BOOKMARK_SAVED", bookmark })} onCommand={controlReaderPlayback} onSettings={updateReaderSettings} floatingAvailable={capabilities.floatingReader} floatingVisible={Boolean(nativeFloatingState?.visible)} onFloatingToggle={switchToFloatingReader} onOpenSettings={() => setSettingsOpen(true)} />
                 : <Library features={connectionRef.current?.features} onReload={() => reloadLibraryFeatures().catch((e) => setBridgeError(e.message))} {...libraryActions} books={books} sortMode={librarySortMode} error={bridgeError} loading={libraryLoading} capabilities={effectiveCapabilities} readerEnabled={readerEnabled} importState={importState} openAfterImportBookId={openAfterImportBookId} />}
           </main>
         </div>
