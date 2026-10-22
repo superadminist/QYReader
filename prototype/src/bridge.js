@@ -101,7 +101,7 @@ const BOOK_FIELDS = {
 const DUPLICATE_MODES = new Set(["cancel", "overwrite", "reparse"]);
 const PLAYBACK_STATUSES = new Set(["idle", "playing", "paused", "finished", "error"]);
 const PLAYBACK_COMMANDS = new Set(["play", "pause", "stop", "previousSentence", "nextSentence"]);
-const PLAYBACK_REASONS = new Set(["state", "sentenceStart", "sentenceDone", "buffering", "finished", "fallback", "recovered", "error"]);
+const PLAYBACK_REASONS = new Set(["state", "sentenceStart", "sentenceDone", "sleepStopped", "buffering", "finished", "fallback", "recovered", "error"]);
 const FLOATING_BACKGROUNDS = new Set(["light", "sepia", "dark"]);
 const APP_THEMES = new Set(["白天", "护眼", "夜间", "米黄"]);
 const SOFTWARE_UPDATE_STATUSES = new Set(["idle", "checking", "upToDate", "available", "skipped", "downloading", "ready", "installing", "error"]);
@@ -458,9 +458,25 @@ function validReaderSentence(sentence) {
   );
 }
 
+function validSleepTimer(timer) {
+  return Boolean(timer && ["off", "minutes", "chapter"].includes(timer.mode) && Number.isInteger(timer.remainingMs) && timer.remainingMs >= 0 && typeof timer.bookId === "string" && (timer.chapterIndex === null || Number.isInteger(timer.chapterIndex) && timer.chapterIndex >= 0) && typeof timer.endReason === "string" && Number.isInteger(timer.version) && timer.version >= 0);
+}
+
+function validFeatureResult(input, data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  if (["sleepTimer", "sleepTimerState"].includes(input.action)) return validSleepTimer(data);
+  if (["voiceCenter", "voiceFavorite"].includes(input.action)) return Array.isArray(data.voices) && data.voices.every((voice) => typeof voice.id === "string" && typeof voice.label === "string" && ["sapi", "edge", "kokoro"].includes(voice.backend) && typeof voice.available === "boolean" && typeof voice.unavailableReason === "string") && Array.isArray(data.favorites) && data.favorites.every((id) => typeof id === "string") && validReaderPlayback(data.playback);
+  const validJob = (job) => Boolean(job && typeof job.jobId === "string" && job.jobId && typeof job.bookId === "string" && ["edge", "kokoro"].includes(job.backend) && ["queued", "preparing", "running", "paused", "cancelled", "completed", "error"].includes(job.state) && Array.isArray(job.chapterIndices) && job.chapterIndices.every((i) => Number.isInteger(i) && i >= 0) && [job.done, job.total, job.bytes].every(nonNegativeNumber) && typeof job.verified === "boolean");
+  if (input.action === "cacheState") return Array.isArray(data.jobs) && data.jobs.every(validJob) && typeof data.cacheRoot === "string";
+  if (["cacheCreate", "cacheControl"].includes(input.action)) return validJob(data);
+  if (["backupInventory", "backupCreate", "backupInspect", "backupRestore", "backupJob", "backupCancel"].includes(input.action)) return data.cancelled === true || typeof data.jobId === "string" && data.jobId && ["inventory", "create", "inspect", "restore"].includes(data.kind) && ["running", "completed", "cancelled", "error"].includes(data.status) && validBridgeError(data.error);
+  return true;
+}
+
 function validReaderPlayback(playback) {
   return Boolean(
     playback
+    && (playback.sleepTimer === undefined || validSleepTimer(playback.sleepTimer))
     && PLAYBACK_STATUSES.has(playback.status)
     && validReaderPosition(playback.position)
     && validReaderSentence(playback.sentence)
@@ -1008,8 +1024,17 @@ function createNativeConnection(nativeBridge, initialState) {
     floating: nativeFloating(nativeBridge),
     features: {
       invoke(input) {
-        return invokeReader(nativeBridge, "readerFeatureAction", input, (data) => Boolean(data && typeof data === "object" && !Array.isArray(data)));
+        return invokeReader(nativeBridge, "readerFeatureAction", input, (data) => validFeatureResult(input, data));
       },
+    },
+    onFeaturesChanged(callback) {
+      return signalSubscription(nativeBridge.featuresChanged, (raw) => {
+        try {
+          const event = parseJsonPayload(raw, "功能状态事件无效。");
+          if (event.schemaVersion !== SCHEMA_VERSION || typeof event.kind !== "string" || !event.data || typeof event.data !== "object") throw new BridgeProtocolError("功能状态事件无效。", "BRIDGE_INVALID_PAYLOAD");
+          callback(event);
+        } catch (error) { reportProtocolError(error); }
+      }, subscriptions);
     },
     onBridgeError(callback) {
       bridgeErrorCallbacks.add(callback);
@@ -1146,6 +1171,16 @@ function createDemoConnection() {
   const demoModelState = () => ({ variant: demoModelVariant, modelId: `kokoro-v1.0-${demoModelVariant}`, status: "missing", jobId: "", error: null, totalBytes: demoModelVariant === "fp32" ? 349906910 : 132303094, downloadedBytes: 0, progressPercent: 0, installedBytes: 0, directory: "桌面应用本地模型目录", message: "浏览器预览不下载模型。", playback: demoPlaybackState });
   const demoFeatures = {
     async invoke(input) {
+      if (input.action === "sleepTimer" || input.action === "sleepTimerState") {
+        if (input.action === "sleepTimer") {
+          if (!["off", "minutes", "chapter"].includes(input.mode) || input.mode === "minutes" && (!Number.isInteger(input.minutes) || input.minutes < 1 || input.minutes > 720)) throw new BridgeProtocolError("请输入 1–720 的整数分钟。", "INVALID_REQUEST");
+          if (input.mode === "chapter" && !demoSessionId) throw new BridgeProtocolError("请先打开书籍。", "INVALID_REQUEST");
+          demoSleepDeadline = input.mode === "minutes" ? Date.now() + input.minutes * 60000 : 0;
+          demoPlaybackState = { ...demoPlaybackState, sleepTimer: { mode: input.mode, remainingMs: input.minutes * 60000 || 0, bookId: demoBookId, chapterIndex: demoPosition.chapterIndex, endReason: input.mode === "off" ? "cancelled" : "", version: (demoPlaybackState.sleepTimer?.version || 0) + 1 } };
+          publishDemoSleep();
+        }
+        return response(demoPlaybackState.sleepTimer || { mode: "off", remainingMs: 0, bookId: "", chapterIndex: null, endReason: "", version: 0 });
+      }
       if (input.action === "modelState") return response(demoModelState());
       if (input.action === "modelVariant") {
         if (!["int8", "fp32"].includes(input.variant)) throw new BridgeProtocolError("模型版本无效。", "MODEL_VARIANT_INVALID");
@@ -1153,12 +1188,42 @@ function createDemoConnection() {
         demoModelVariant = input.variant;
         return response(demoModelState());
       }
+      if (input.action === "cacheState") return response({ jobs: [], cacheRoot: "桌面应用本地语音目录" });
+      if (["cacheCreate", "cacheControl", "backupInventory", "backupCreate", "backupInspect", "backupRestore", "backupJob", "backupCancel"].includes(input.action)) throw new BridgeProtocolError("请在桌面应用中管理本地文件和离线章节。", "FEATURE_DESKTOP_REQUIRED");
+      if (input.action === "voiceCenter" || input.action === "voiceFavorite") {
+        if (input.action === "voiceFavorite") {
+          if (typeof input.voiceId !== "string" || typeof input.favorite !== "boolean") throw new BridgeProtocolError("音色收藏参数无效。", "INVALID_REQUEST");
+          demoVoiceFavorites = input.favorite ? [...new Set([...demoVoiceFavorites, input.voiceId])] : demoVoiceFavorites.filter((x) => x !== input.voiceId);
+        }
+        const voices = demoSpeech.voices.map((v) => ({ ...v, available: v.available ?? true, statusLabel: v.backend === "edge" ? "需联网" : v.available === false ? "未安装模型" : "离线", unavailableReason: v.available === false ? "请先安装所选版本的Kokoro模型" : "" }));
+        for (const id of demoVoiceFavorites) if (!voices.some((v) => v.id === id)) voices.push({ id, label: id, backend: "sapi", requiresNetwork: false, available: false, statusLabel: "不可用", unavailableReason: "此系统音色当前未安装，收藏已保留" });
+        return response({ voices, favorites: demoVoiceFavorites, playback: demoPlaybackState });
+      }
+      if (input.action === "previewVoice" || input.action === "cancelPreview") throw new BridgeProtocolError("请在桌面应用中试听音色。", "FEATURE_DESKTOP_REQUIRED");
       if (input.action === "organizationState") return response(demoTaxonomy);
       if (input.action === "statistics") return response({ today: { readingMs: 0, listeningMs: 0, overlapMs: 0, totalMs: 0 }, total: { readingMs: 0, listeningMs: 0, overlapMs: 0, totalMs: 0 }, days: [] });
       if (input.action === "activity") return response({ accepted: true });
       if (input.action === "organizationUpdate") {
         const r = input.request;
-        if (r.action === "book") { const book = initialState.data.library.books.find((x) => x.id === r.bookId); if (book) { Object.assign(book, r.patch); if (r.patch.statusMode === "auto") book.readingStatus = book.progressPercent >= 100 ? "read" : book.progressPercent > 0 ? "reading" : "unread"; } }
+        if (r.action === "batch") {
+          const ids = r.bookIds, patch = r.patch;
+          const invalid = (message) => { throw new BridgeProtocolError(message, "INVALID_REQUEST"); };
+          if (!Array.isArray(ids) || !ids.length || ids.some((id) => typeof id !== "string" || !id) || new Set(ids).size !== ids.length) invalid("请选择有效内容，书籍编号不能重复。");
+          const targets = ids.map((id) => initialState.data.library.books.find((book) => book.id === id));
+          if (targets.some((book) => !book)) throw new BridgeProtocolError("选中内容已不在书架中，本次批量修改未保存。", "BOOK_NOT_FOUND");
+          if (!patch || typeof patch !== "object" || !Object.keys(patch).length || Object.keys(patch).some((key) => !["categoryId", "addTagIds", "removeTagIds", "readingStatus", "statusMode"].includes(key))) invalid("批量修改参数无效。");
+          if ("categoryId" in patch && !["", ...demoTaxonomy.categories.map((x) => x.id)].includes(patch.categoryId)) invalid("分类不存在。");
+          for (const key of ["addTagIds", "removeTagIds"]) if (key in patch && (!Array.isArray(patch[key]) || patch[key].some((id) => !demoTaxonomy.tags.some((t) => t.id === id)) || new Set(patch[key]).size !== patch[key].length)) invalid("标签不存在或重复。");
+          if ((patch.addTagIds || []).some((id) => (patch.removeTagIds || []).includes(id))) invalid("同一标签不能同时添加和移除。");
+          if ("readingStatus" in patch && !["unread", "reading", "read"].includes(patch.readingStatus) || "statusMode" in patch && !["auto", "manual"].includes(patch.statusMode) || patch.statusMode === "auto" && "readingStatus" in patch) invalid("阅读状态无效。");
+          for (const book of targets) {
+            if ("categoryId" in patch) book.categoryId = patch.categoryId;
+            if ("addTagIds" in patch || "removeTagIds" in patch) book.tagIds = [...new Set([...(book.tagIds || []), ...(patch.addTagIds || [])])].filter((id) => !(patch.removeTagIds || []).includes(id));
+            if ("readingStatus" in patch) { book.readingStatus = patch.readingStatus; book.statusMode = "manual"; }
+            if ("statusMode" in patch) { book.statusMode = patch.statusMode; if (patch.statusMode === "auto") book.readingStatus = book.progressPercent >= 100 ? "read" : book.progressPercent > 0 ? "reading" : "unread"; }
+          }
+        }
+        else if (r.action === "book") { const book = initialState.data.library.books.find((x) => x.id === r.bookId); if (book) { Object.assign(book, r.patch); if (r.patch.statusMode === "auto") book.readingStatus = book.progressPercent >= 100 ? "read" : book.progressPercent > 0 ? "reading" : "unread"; } }
         else if (r.action === "create") demoTaxonomy[r.kind].push({ id: `demo-${Date.now()}`, name: r.name });
         else if (r.action === "rename") { const term = demoTaxonomy[r.kind].find((x) => x.id === r.id); if (term) term.name = r.name; }
         else if (r.action === "delete") { demoTaxonomy[r.kind] = demoTaxonomy[r.kind].filter((x) => x.id !== r.id); for (const book of initialState.data.library.books) { if(r.kind === "categories" && book.categoryId === r.id) book.categoryId = ""; if(r.kind === "tags") book.tagIds = (book.tagIds || []).filter(x=>x!==r.id); } }
@@ -1185,7 +1250,24 @@ function createDemoConnection() {
   let demoPosition = { chapterIndex: 0, charOffset: 0, progressPercent: 0 };
   let demoPlaybackState = demoPlayback(demoPosition);
   let demoFloating = demoFloatingState();
-  let demoSpeech = { ...initialState.data.speech, settings: { ...initialState.data.speech.settings } };
+  let demoSleepDeadline = 0;
+  const publishDemoSleep = () => {
+    emit(readerPlaybackCallbacks, { schemaVersion: SCHEMA_VERSION, sessionId: demoSessionId, bookId: demoBookId, sequence: ++readerSequence, commandId: "", reason: "state", playback: demoPlaybackState, error: null });
+    demoFloating = { ...demoFloating, playback: demoPlaybackState };
+    emit(floatingChangedCallbacks, { schemaVersion: SCHEMA_VERSION, state: demoFloating });
+  };
+  const sleepInterval = setInterval(() => {
+    if (!demoSleepDeadline) return;
+    const remainingMs = Math.max(0, demoSleepDeadline - Date.now());
+    const expired = remainingMs === 0;
+    demoPlaybackState = { ...demoPlaybackState, ...(expired ? { status: "idle" } : {}), sleepTimer: { ...demoPlaybackState.sleepTimer, remainingMs, ...(expired ? { mode: "off", endReason: "expired" } : {}) } };
+    if (expired) demoSleepDeadline = 0;
+    publishDemoSleep();
+  }, 1000);
+  sleepInterval.unref?.();
+  let demoVoiceFavorites = [];
+  let demoSpeech = { ...initialState.data.speech, settings: { ...initialState.data.speech.settings }, voices: [...initialState.data.speech.voices, ...[["zf_xiaobei", "晓北"], ["zf_xiaoni", "晓妮"], ["zf_xiaoxiao", "晓晓"], ["zf_xiaoyi", "晓伊"], ["zm_yunjian", "云健"], ["zm_yunxi", "云希"], ["zm_yunxia", "云夏"], ["zm_yunyang", "云扬"]].map(([id, label]) => ({ id: `kokoro:v1.0:${id}`, label: `${label} · Kokoro离线`, backend: "kokoro", requiresNetwork: false, available: false }))] };
+  initialState.data.speech = demoSpeech;
   let demoSoftwareUpdate = { ...initialState.data.softwareUpdate };
   let demoManualOrder = initialState.data.library.books.map((book) => book.id);
   const demoRecentOrder = [...demoManualOrder];
@@ -1411,7 +1493,8 @@ function createDemoConnection() {
         demoSessionId = `demo-reader-session-${readerSequence}`;
         demoBookId = bookId;
         demoPosition = { chapterIndex: 0, charOffset: 0, progressPercent: 0 };
-        demoPlaybackState = demoPlayback(demoPosition);
+        const oldSleep = demoPlaybackState.sleepTimer;
+        demoPlaybackState = { ...demoPlayback(demoPosition), sleepTimer: oldSleep?.mode === "chapter" ? { ...oldSleep, mode: "off", endReason: "bookChanged", version: oldSleep.version + 1 } : oldSleep };
         demoFloating = { ...demoFloating, sessionId: demoSessionId, bookId, playback: demoPlaybackState };
         setTimeout(() => emit(readerOpenedCallbacks, {
           schemaVersion: SCHEMA_VERSION,
@@ -1436,6 +1519,7 @@ function createDemoConnection() {
         const target = input.target.kind === "percent"
           ? { chapterIndex: 0, charOffset: Math.round(DEMO_READER_TEXT.length * input.target.percent / 100), progressPercent: input.target.percent }
           : { chapterIndex: input.target.chapterIndex, charOffset: input.target.charOffset, progressPercent: Math.round(input.target.charOffset / Math.max(1, DEMO_READER_TEXT.length) * 1000) / 10 };
+        if (demoPlaybackState.sleepTimer?.mode === "chapter" && target.chapterIndex !== demoPlaybackState.sleepTimer.chapterIndex) demoPlaybackState = { ...demoPlaybackState, sleepTimer: { ...demoPlaybackState.sleepTimer, mode: "off", endReason: "chapterChanged", version: demoPlaybackState.sleepTimer.version + 1 } };
         demoPosition = target;
         demoPlaybackState = { ...demoPlaybackState, position: target };
         demoFloating = { ...demoFloating, playback: demoPlaybackState };
@@ -1461,7 +1545,9 @@ function createDemoConnection() {
       async controlPlayback(input) {
         const status = input.command === "pause" ? "paused" : input.command === "stop" ? "idle" : "playing";
         const commandId = `demo-command-${++readerSequence}`;
-        demoPlaybackState = demoPlayback(demoPosition, status);
+        let sleepTimer = demoPlaybackState.sleepTimer;
+        if (input.command === "stop") { demoSleepDeadline = 0; sleepTimer = { ...sleepTimer, mode: "off", remainingMs: 0, endReason: "manualStop", version: (sleepTimer?.version || 0) + 1 }; }
+        demoPlaybackState = { ...demoPlayback(demoPosition, status), sleepTimer };
         setTimeout(() => emit(readerPlaybackCallbacks, { schemaVersion: SCHEMA_VERSION, sessionId: input.sessionId, bookId: demoBookId, sequence: readerSequence, commandId, reason: "state", playback: demoPlaybackState, error: null }), 0);
         demoFloating = { ...demoFloating, sessionId: input.sessionId, bookId: demoBookId, playback: demoPlaybackState };
         setTimeout(() => emit(floatingChangedCallbacks, { schemaVersion: SCHEMA_VERSION, state: demoFloating }), 0);
@@ -1508,6 +1594,7 @@ function createDemoConnection() {
     onFloatingReaderChanged(callback) { floatingChangedCallbacks.add(callback); },
     onFloatingPointerChanged() {},
     dispose() {
+      clearInterval(sleepInterval);
       jobs.forEach((job) => clearTimeout(job.timer));
       jobs.clear();
       progressCallbacks.clear();

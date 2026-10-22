@@ -102,6 +102,20 @@ class KokoroPlaybackTests(unittest.TestCase):
         # Synthesis admission does not move the lyric before the player starts.
         self.assertEqual(speech.drain(), [])
 
+    def test_missing_model_lookahead_does_not_block_a_cached_current_sentence(self):
+        from novelreader.feature_store import FeatureError
+        service = FakeKokoro(self.path)
+        original = service.request
+        def cached_only(text, *args, **kwargs):
+            if kwargs.get("priority") != 0:
+                raise FeatureError("MODEL_NOT_READY", "未安装模型。")
+            return original(text, *args, **kwargs)
+        service.request = cached_only
+        speech = self.controller(service)
+        with mock.patch.object(speech, "_speak_edge_play", return_value=True) as play:
+            self.assertTrue(speech._speak_kokoro("当前句。", 7, "当前句。下一句。", 4, {"type": "sentence_start"}))
+        play.assert_called_once()
+
     def test_pause_keeps_inflight_sentence_and_resume_uses_its_ready_audio(self):
         service = FakeKokoro(self.path, pending=True)
         speech = self.controller(service, state="paused")

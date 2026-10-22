@@ -278,7 +278,7 @@ class EdgeResilienceTests(unittest.TestCase):
     def test_batch_playback_and_resume_keep_the_sentence_end_limit(self):
         controller = self.controller()
         controller._book = make_book()
-        controller._state = "paused"
+        controller._state = "playing"
         controller._gen = 9
         ranges = []
 
@@ -286,11 +286,18 @@ class EdgeResilienceTests(unittest.TestCase):
             controller._state = "playing"
             controller._resume_counter += 1
 
+        checks = iter([True, False])
+        def playing_then_pause():
+            playing = next(checks)
+            if playing:
+                controller._state = "paused"
+            return playing
+
         with (
             mock.patch.object(tts, "_mci_open"), mock.patch.object(tts, "_mci_close"),
             mock.patch.object(tts, "_mci_stop"), mock.patch.object(tts, "_mci_pause"),
             mock.patch.object(tts, "_mci_set_volume"), mock.patch.object(tts, "_set_process_volume"),
-            mock.patch.object(tts, "_mci_playing", side_effect=[True, False]),
+            mock.patch.object(tts, "_mci_playing", side_effect=playing_then_pause),
             mock.patch.object(tts, "_mci_play_range", side_effect=lambda a, b: ranges.append((a, b))),
             mock.patch.object(controller._cv, "wait", side_effect=resume_during_wait),
         ):

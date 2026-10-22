@@ -118,6 +118,16 @@ def _cache_path(path):
     return Path("\\\\?\\" + value)
 
 
+def normal_cache_path(path):
+    """Compare standard/extended Windows spellings as the same physical path."""
+    value = str(path)
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return Path(value).resolve()
+
+
 def safe_extract(archive, destination, cancelled=lambda: False):
     """Manual extraction also works on Python 3.10: never trust extractall."""
     destination = Path(destination).resolve()
@@ -202,6 +212,18 @@ class KokoroService:
         self.futures = OrderedDict()
         self._synthesis_context = threading.local()
         self._cache_bytes = None
+        self.retention_path = self.data_root / "offline-audio-refs-v1.json"
+        self._retained_refs = {}
+        self._retained_paths_cache = None
+        self._retention_invalid = False
+        try:
+            if self.retention_path.is_file():
+                saved_refs = json.loads(self.retention_path.read_text(encoding="utf-8"))
+                if saved_refs.get("version") != 1 or not isinstance(saved_refs.get("refs"), dict):
+                    raise ValueError("invalid retention index")
+                self._retained_refs = saved_refs["refs"]
+        except (OSError, ValueError, TypeError):
+            self._retention_invalid = True
         self._cache_root = self.data_root / "tts_cache"
         try:
             settings = json.loads((self.data_root / "library.json").read_text(encoding="utf-8")).get("settings", {})
@@ -211,6 +233,7 @@ class KokoroService:
         except (OSError, ValueError, AttributeError):
             pass
         self.cache = _cache_path(self._cache_root / self.package["modelId"])
+        self._retained_paths_locked()
         self.state = {"modelId": self.package["modelId"], "variant": self.variant,
                       "status": "ready" if (self.directory / "manifest.json").is_file() else "missing",
                       "jobId": "", "downloadedBytes": 0, "totalBytes": self.package["bytes"], "progressPercent": 0,
@@ -419,7 +442,11 @@ class KokoroService:
             raise FeatureError("VOICE_INVALID", "Kokoro音色无效。")
         with self.lock:
             key = hashlib.sha256(f"{self.package['sha256']}|{sid}|{rate}|v1|{text}".encode("utf-8")).hexdigest()
-            if self.snapshot()["status"] != "ready":
+            # Prepared WAV playback needs no model load. A backup may contain
+            # retained audio without the optional large model package.
+            path = self.cache / (key + ".wav")
+            cached = path.is_file() and path.stat().st_size > 44
+            if self.snapshot()["status"] != "ready" and not cached:
                 raise FeatureError("MODEL_NOT_READY", "请先下载或导入所选版本的Kokoro v1.0模型包。", True)
             existing = self.futures.get(key)
             if existing is not None and (existing.cancelled() or existing.done() and existing.exception() is not None):
@@ -518,28 +545,127 @@ class KokoroService:
                 return  # A finished old-model request stays in its original cache.
             self._trim_cache_locked(path)
 
+    def cache_path_for(self, text, voice, rate, *, package=None):
+        sid = next((sid for sid, name, _ in VOICES if voice == f"kokoro:v1.0:{name}"), None)
+        if sid is None:
+            raise FeatureError("VOICE_INVALID", "Kokoro音色无效。")
+        with self.lock:
+            package = package or self.package
+            key = hashlib.sha256(f"{package['sha256']}|{sid}|{rate}|v1|{text}".encode("utf-8")).hexdigest()
+            return _cache_path(self._cache_root / package["modelId"] / (key + ".wav"))
+
+    def _retained_paths_locked(self):
+        if self._retained_paths_cache is not None:
+            return self._retained_paths_cache
+        root = normal_cache_path(self._cache_root)
+        paths = set()
+        for entries in self._retained_refs.values():
+            if not isinstance(entries, list):
+                self._retention_invalid = True
+                continue
+            for name in entries:
+                if not isinstance(name, str):
+                    self._retention_invalid = True
+                    continue
+                candidate = (root / name).resolve()
+                if candidate.is_relative_to(root) and candidate.suffix == ".wav":
+                    paths.add(candidate)
+                else:
+                    self._retention_invalid = True
+        self._retained_paths_cache = paths
+        return paths
+
+    def retain_path(self, path, reference):
+        """Persist a chapter reference before requesting synthesis (also pins in-flight files)."""
+        with self.lock:
+            root = normal_cache_path(self._cache_root)
+            candidate = normal_cache_path(path)
+            if not candidate.is_relative_to(root) or candidate.suffix != ".wav":
+                raise FeatureError("CACHE_PATH_INVALID", "离线音频路径无效。")
+            if self._retention_invalid:
+                raise FeatureError("CACHE_INDEX_INVALID", "保留章节索引损坏，未覆盖。")
+            retained = self._retained_paths_locked()
+            previously_retained = candidate in retained
+            values = self._retained_refs.setdefault(str(reference), [])
+            relative = candidate.relative_to(root).as_posix()
+            if relative not in values:
+                values.append(relative)
+                self._save_retention_locked()
+                retained.add(candidate)
+                if not previously_retained and self._cache_bytes is not None and candidate.is_file():
+                    self._cache_bytes = max(0, self._cache_bytes - candidate.stat().st_size)
+
+    def retain_paths(self, paths, reference):
+        """Replace one chapter's exact references without deleting released audio."""
+        with self.lock:
+            root = normal_cache_path(self._cache_root)
+            candidates = {normal_cache_path(path) for path in paths}
+            if any(not path.is_relative_to(root) or path.suffix != ".wav" for path in candidates):
+                raise FeatureError("CACHE_PATH_INVALID", "离线音频路径无效。")
+            if self._retention_invalid:
+                raise FeatureError("CACHE_INDEX_INVALID", "保留章节索引损坏，未覆盖。")
+            before = set(self._retained_paths_locked())
+            self._retained_refs[str(reference)] = sorted(path.relative_to(root).as_posix() for path in candidates)
+            self._retained_paths_cache = None
+            after = self._retained_paths_locked()
+            self._save_retention_locked()
+            if self._cache_bytes is not None:
+                released = sum(path.stat().st_size for path in before - after if path.is_file())
+                retained = sum(path.stat().st_size for path in after - before if path.is_file())
+                self._cache_bytes = max(0, self._cache_bytes + released - retained)
+
+    def release_reference(self, reference):
+        with self.lock:
+            if self._retention_invalid:
+                raise FeatureError("CACHE_INDEX_INVALID", "保留章节索引损坏，未覆盖。")
+            before = set(self._retained_paths_locked())
+            self._retained_refs.pop(str(reference), None)
+            self._retained_paths_cache = None
+            after = self._retained_paths_locked()
+            self._save_retention_locked()
+            if self._cache_bytes is not None:
+                self._cache_bytes += sum(path.stat().st_size for path in before - after if path.is_file())
+
+    def is_retained(self, path):
+        with self.lock:
+            retained = self._retained_paths_locked()
+            return self._retention_invalid or normal_cache_path(path) in retained
+
+    def _save_retention_locked(self):
+        self.data_root.mkdir(parents=True, exist_ok=True)
+        temporary = self.retention_path.with_name(self.retention_path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            temporary.write_text(json.dumps({"version": 1, "refs": self._retained_refs}, ensure_ascii=False), encoding="utf-8")
+            os.replace(temporary, self.retention_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def _trim_cache_locked(self, path):
-        # Account incrementally; scan/sort only at first use or the size limit.
+        # Retained chapters have an independent lifetime. Only temporary bytes count
+        # toward the 500 MiB budget; never evict a retained or pending chapter file.
+        retained = self._retained_paths_locked()
+        if self._retention_invalid:
+            return
         if self._cache_bytes is None:
-            self._cache_bytes = sum(x.stat().st_size for x in self.cache.glob("*.wav") if x.is_file())
-        else:
+            self._cache_bytes = sum(item.stat().st_size for item in self.cache.glob("*.wav") if item.is_file() and normal_cache_path(item) not in retained)
+        elif normal_cache_path(path) not in retained:
             self._cache_bytes += path.stat().st_size
         if self._cache_bytes <= CACHE_BYTES:
             return
-        files = sorted(self.cache.glob("*.wav"), key=lambda x: x.stat().st_mtime)
-        size = sum(x.stat().st_size for x in files)
-        protected = {f.result() for f in self.futures.values()
+        temporary = [item for item in self.cache.glob("*.wav") if item.is_file() and normal_cache_path(item) not in retained]
+        size = sum(item.stat().st_size for item in temporary)
+        protected = {normal_cache_path(f.result()) for f in self.futures.values()
                      if f.done() and not f.cancelled() and f.exception() is None}
-        for item in files:
+        for item in sorted(temporary, key=lambda x: x.stat().st_mtime):
             if size <= CACHE_BYTES:
                 break
-            if item != path and item not in protected:
+            if item != path and normal_cache_path(item) not in protected:
                 try:
                     removed_bytes = item.stat().st_size
                     item.unlink()
                     size -= removed_bytes
                 except OSError:
-                    pass  # Windows may be playing this file.
+                    pass
         self._cache_bytes = size
 
     def close(self):

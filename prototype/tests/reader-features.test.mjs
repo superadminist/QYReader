@@ -80,3 +80,51 @@ test("demo model variant waits for a stopped playback session", async () => {
     assert.equal((await c.features.invoke({ action: "modelVariant", variant: "fp32" })).data.variant, "fp32");
   } finally { c.dispose(); }
 });
+
+
+test("demo sleep plans share playback state, survive pause and cancel without stopping", async () => {
+  const c = await connectBridge();
+  try {
+    await c.reader.openBook("demo-1");
+    let timer = (await c.features.invoke({ action: "sleepTimer", mode: "minutes", minutes: 30 })).data;
+    assert.equal(timer.remainingMs, 1800000);
+    await c.reader.controlPlayback({ sessionId: "demo", command: "play" });
+    await c.reader.controlPlayback({ sessionId: "demo", command: "pause" });
+    assert.equal((await c.floating.getState()).data.playback.sleepTimer.mode, "minutes");
+    await c.features.invoke({ action: "sleepTimer", mode: "off" });
+    assert.equal((await c.floating.getState()).data.playback.status, "paused");
+    for (const minutes of [0, 721, 1.5, "15", true]) await assert.rejects(c.features.invoke({ action: "sleepTimer", mode: "minutes", minutes }));
+    await c.features.invoke({ action: "sleepTimer", mode: "chapter" });
+    await c.reader.openBook("demo-2");
+    assert.equal((await c.floating.getState()).data.playback.sleepTimer.endReason, "bookChanged");
+  } finally { c.dispose(); }
+});
+
+test("demo batch mutations validate all targets before changing state and use tag union", async () => {
+  const c = await connectBridge();
+  try {
+    const before = JSON.stringify((await c.library.getState()).data);
+    await assert.rejects(c.features.invoke({ action: "organizationUpdate", request: { action: "batch", bookIds: ["demo-1", "missing"], patch: { readingStatus: "read" } } }));
+    assert.equal(JSON.stringify((await c.library.getState()).data), before);
+    const batch = (patch) => c.features.invoke({ action: "organizationUpdate", request: { action: "batch", bookIds: ["demo-1", "demo-2"], patch } });
+    await batch({ addTagIds: ["to-read"], readingStatus: "read" });
+    await batch({ addTagIds: ["to-read"] });
+    let book = (await c.library.getState()).data.books.find((x) => x.id === "demo-1");
+    assert.deepEqual(book.tagIds, ["to-read"]); assert.equal(book.statusMode, "manual"); assert.equal(book.progressPercent, 36);
+    await batch({ removeTagIds: ["to-read"], statusMode: "auto" });
+    book = (await c.library.getState()).data.books.find((x) => x.id === "demo-1");
+    assert.deepEqual(book.tagIds, []); assert.equal(book.readingStatus, "reading");
+  } finally { c.dispose(); }
+});
+
+test("demo voice center preserves unavailable favorites and explains local-file boundaries", async () => {
+  const c = await connectBridge();
+  try {
+    const voiceId = "HKEY-unavailable";
+    const state = (await c.features.invoke({ action: "voiceFavorite", voiceId, favorite: true })).data;
+    assert.deepEqual(state.favorites, [voiceId]); assert.equal(state.voices.find((v) => v.id === voiceId).available, false);
+    assert.equal(state.voices.filter((v) => v.backend === "kokoro").length, 8);
+    assert.deepEqual((await c.features.invoke({ action: "cacheState" })).data.jobs, []);
+    for (const action of ["cacheCreate", "backupInventory", "backupInspect", "previewVoice"]) await assert.rejects(c.features.invoke({ action }), (e) => e.code === "FEATURE_DESKTOP_REQUIRED");
+  } finally { c.dispose(); }
+});

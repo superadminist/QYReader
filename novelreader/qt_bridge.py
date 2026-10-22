@@ -135,11 +135,18 @@ class DesktopBridge(QObject):
         from .paths import default_data_dir
         self._feature_root = Path(library_path).parent if library_path else default_data_dir()
         self._organization = OrganizationService(library_path or self._feature_root / "library.json")
+        from .voice_preferences import VoicePreferences
+        self._voice_preferences = VoicePreferences(self._organization.path)
         self._feature_events = queue.Queue()
         self._kokoro = KokoroService(self._feature_root, lambda state: self._feature_events.put(("model", state)))
         attach_kokoro = getattr(getattr(self._playback, "speech_controller", None), "set_kokoro_service", None)
         if callable(attach_kokoro):
             attach_kokoro(self._kokoro)
+        self._backup = None
+        self._restore_job = ""
+        self._maintenance = False
+        self._offline = None
+        self._retired_offline = []
         self._activity = None
         self._active_status_book = ""
         self._feature_timer = QTimer(self)
@@ -218,6 +225,8 @@ class DesktopBridge(QObject):
 
     @Slot(result=str)
     def getInitialState(self) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         try:
             library = self._library.load_library()
             preferences = self._app.state()
@@ -254,6 +263,8 @@ class DesktopBridge(QObject):
 
     @Slot(result=str)
     def selectImportFiles(self) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         if self._active_job_id:
             return self._error_response(
                 self._empty_selection(),
@@ -291,6 +302,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def startFileImport(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         empty = {"jobId": "", "state": "queued"}
         request = self._request_object(request_json)
         if request is None:
@@ -332,6 +345,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def startPasteImport(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         empty = {"jobId": "", "state": "queued"}
         request = self._request_object(request_json)
         if request is None:
@@ -359,6 +374,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def startWebImport(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         from .web_reader import validate_web_url, WebReaderError
 
         empty = {"jobId": "", "state": "queued"}
@@ -379,6 +396,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def cancelImport(self, job_id: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         data = {"jobId": str(job_id or ""), "cancelRequested": False}
         if not job_id or job_id != self._active_job_id or self._import_cancel is None:
             return self._error_response(data, "IMPORT_JOB_NOT_FOUND", "导入任务不存在或已结束。")
@@ -388,6 +407,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def removeLibraryBook(self, book_id: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         empty = {"bookId": str(book_id or ""), "removed": False}
         if self._active_job_id or self._reader_open_request_id:
             return self._error_response(empty, "LIBRARY_BUSY", "正在导入或打开内容，请稍后重试。", True)
@@ -414,6 +435,8 @@ class DesktopBridge(QObject):
 
     @Slot(result=str)
     def getLibraryState(self) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         try:
             return self._ok_response(self._library.load_library())
         except LibraryDataError as exc:
@@ -421,6 +444,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def setLibrarySortMode(self, mode: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         try:
             return self._ok_response(self._library_editor.set_sort_mode(mode))
         except LibraryRemoveError as exc:
@@ -428,6 +453,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def moveLibraryBook(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         empty = {"books": [], "total": 0, "sortMode": "manual"}
         if request is None or set(request) != {"bookId", "beforeBookId"}:
@@ -439,6 +466,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def revealLibrarySource(self, book_id: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         empty = {"bookId": book_id, "opened": False}
         try:
             source = self._library_editor.source_file(book_id)
@@ -453,6 +482,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def openReaderBook(self, book_id: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         safe_book_id = str(book_id or "")
         empty = {"requestId": "", "bookId": safe_book_id, "state": "loading"}
         if not safe_book_id:
@@ -513,6 +544,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def getReaderWindow(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         empty = self._empty_reader_window()
         if request is None:
@@ -529,6 +562,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def navigateReader(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         empty = {
             "position": self._empty_position(),
@@ -551,6 +586,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def updateReaderPosition(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         empty = {"updated": False, "position": self._empty_position()}
         if request is None:
@@ -582,6 +619,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def searchReader(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         empty = {"requestId": "", "state": "searching"}
         if request is None:
@@ -633,6 +672,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def listReaderBookmarks(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         empty = {"total": 0, "nextCursor": "", "items": []}
         if request is None:
@@ -646,6 +687,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def addReaderBookmark(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         empty = self._empty_bookmark()
         if request is None:
@@ -665,6 +708,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def removeReaderBookmark(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         bookmark_id = request.get("bookmarkId", "") if request else ""
         empty = {"bookmarkId": str(bookmark_id or ""), "removed": False}
@@ -679,6 +724,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def controlReaderPlayback(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         empty = {"commandId": "", "accepted": False}
         if request is None:
@@ -696,6 +743,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def updateReaderSettings(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         empty: dict[str, Any] = {}
         if request is None:
@@ -716,6 +765,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def updateSpeechPreferences(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         if request is None:
             return self._error_response(
@@ -747,10 +798,14 @@ class DesktopBridge(QObject):
 
     @Slot(result=str)
     def getFloatingReaderState(self) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         return self._ok_response(self._floating.state())
 
     @Slot(result=str)
     def showFloatingReader(self) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         try:
             if not self._playback.session_identity().get("sessionId"):
                 raise FloatingReaderError("READER_NOT_OPEN", "请先打开一本内容再使用悬浮朗读窗。")
@@ -771,6 +826,8 @@ class DesktopBridge(QObject):
 
     @Slot(result=str)
     def closeFloatingReader(self) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         try:
             close = getattr(self._window, "closeFloatingReaderWindow", None)
             if callable(close):
@@ -783,6 +840,8 @@ class DesktopBridge(QObject):
 
     @Slot(result=str)
     def returnToMainWindow(self) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         """Switch surfaces without stopping the one active speech session."""
         result = self.closeFloatingReader()
         try:
@@ -799,6 +858,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def updateFloatingReaderSettings(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         if request is None:
             return self._error_response(
@@ -842,6 +903,8 @@ class DesktopBridge(QObject):
             self._emit_floating_state()
 
     def floatingGeometryChanged(self, geometry: str) -> None:
+        if self._maintenance:
+            return
         try:
             changed = self._floating.update_geometry(geometry)
         except FloatingReaderError as exc:
@@ -852,6 +915,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def updateAppPreferences(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         if request is None:
             return self._error_response(
@@ -874,6 +939,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def checkSoftwareUpdate(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         manual = request.get("manual") if request is not None else None
         if not isinstance(manual, bool):
@@ -899,6 +966,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def downloadSoftwareUpdate(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         version = request.get("version") if request is not None else None
         release = self._available_update
@@ -930,6 +999,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def skipSoftwareUpdate(self, request_json: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         request = self._request_object(request_json)
         version = request.get("version") if request is not None else None
         release = self._available_update
@@ -953,6 +1024,8 @@ class DesktopBridge(QObject):
 
     @Slot(result=str)
     def installSoftwareUpdate(self) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         path = self._ready_installer_path
         if self._software_update_state.get("status") != "ready" or not path:
             return self._error_response(
@@ -982,6 +1055,8 @@ class DesktopBridge(QObject):
 
     @Slot(str, result=str)
     def openSoftwareUpdatePage(self, target: str) -> str:
+        if getattr(self, "_maintenance", False):
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         if target == "project":
             url = PROJECT_URL
         elif target == "release":
@@ -1218,9 +1293,25 @@ class DesktopBridge(QObject):
         if not request:
             return self._error_response({}, "INVALID_REQUEST", "请求格式无效。")
         action = request.get("action")
+        if self._maintenance and action not in {"backupJob", "backupCancel"}:
+            return self._error_response({}, "RESTORE_IN_PROGRESS", "正在恢复数据，请等待完成。", True)
         try:
             from PySide6.QtWidgets import QFileDialog
-            if action == "modelState":
+            if action in {"backupInventory", "backupCreate", "backupInspect", "backupRestore", "backupJob", "backupCancel"}:
+                data = self._backup_action(action, request)
+            elif action == "sleepTimer":
+                data = self._playback.set_sleep_timer(request.get("mode"), request.get("minutes"))
+            elif action == "sleepTimerState":
+                data = self._playback.snapshot()["sleepTimer"]
+            elif action in {"cacheState", "cacheCreate", "cacheControl"}:
+                offline = self._offline_cache_service()
+                if action == "cacheState":
+                    data = offline.state()
+                elif action == "cacheCreate":
+                    data = offline.create(request.get("bookId"), request.get("chapterIndices"), request.get("backend"), request.get("voiceId"), request.get("rate"))
+                else:
+                    data = offline.control(request.get("jobId"), request.get("command"), confirmed=request.get("confirmed", False))
+            elif action == "modelState":
                 data = {**self._kokoro.snapshot(), "playback": self._playback.snapshot()}
             elif action == "modelVariant":
                 if self._playback.snapshot()["status"] in {"playing", "paused"}:
@@ -1244,11 +1335,21 @@ class DesktopBridge(QObject):
                     raise FeatureError("MODEL_BUSY", "请先停止朗读，再选择模型目录。")
                 path = QFileDialog.getExistingDirectory(self._window, "选择离线模型存放目录")
                 data = self._kokoro.set_directory(path) if path else self._kokoro.snapshot()
+            elif action in {"voiceCenter", "voiceFavorite"}:
+                if action == "voiceFavorite":
+                    self._voice_preferences.set_favorite(request.get("voiceId"), request.get("favorite"))
+                data = self._voice_center_state()
+            elif action == "cancelPreview":
+                self._playback.cancel_preview()
+                data = {"accepted": True}
             elif action == "previewVoice":
                 voice = request.get("voiceId")
-                if voice not in {x["id"] for x in self._kokoro.voices()} or self._kokoro.snapshot()["status"] != "ready":
-                    raise FeatureError("VOICE_NOT_READY", "请先安装离线音色包。")
-                data = self._playback.preview("你好，这是启远阅读的离线音色试听。文字在这里，声音陪伴你。", voice)
+                option = next((x for x in self._speech_state()["voices"] if x["id"] == voice), None)
+                if option is None:
+                    raise FeatureError("VOICE_NOT_FOUND", "此音色当前不可用，请重新选择。")
+                if option.get("available") is False:
+                    raise FeatureError("VOICE_NOT_READY", "请先下载或导入所选音色的离线模型包。")
+                data = self._playback.preview("你好，这是启远阅读的音色试听。文字在这里，声音陪伴你。", voice)
             elif action == "organizationState":
                 data = self._organization.state()
             elif action == "organizationUpdate":
@@ -1323,6 +1424,9 @@ class DesktopBridge(QObject):
                 self._active_status_book = book_id
 
     def _drain_features(self):
+        if self._maintenance:
+            self._finish_restore_if_ready()
+            return
         if self._shutdown:
             return
         while True:
@@ -1331,7 +1435,7 @@ class DesktopBridge(QObject):
             except queue.Empty:
                 break
             self.featuresChanged.emit(_json({"schemaVersion": SCHEMA_VERSION, "kind": kind, "data": state}))
-            if state["status"] in {"ready", "error", "cancelled", "missing"}:
+            if kind == "model" and state.get("status") in {"ready", "error", "cancelled", "missing"}:
                 self.speechPreferencesChanged.emit(_json({"schemaVersion": SCHEMA_VERSION, "state": self._speech_state()}))
         try:
             self._tick_activity()
@@ -1343,12 +1447,26 @@ class DesktopBridge(QObject):
             self._import_cancel.set()
         self._selections.clear()
 
-    def shutdown(self) -> None:
+    def prepare_shutdown(self):
+        if self._backup is not None and not self._backup.request_close():
+            if not getattr(self, "_exit_wait_notice", False):
+                self._exit_wait_notice = True
+                self._emit_error("EXIT_WAITING_BACKUP", "正在取消数据任务，完成回滚后将自动退出。")
+            return False
+        return True
+
+    def shutdown(self) -> bool:
         if self._shutdown:
-            return
+            return True
+        if self._backup is not None and not self._backup.close():
+            return False
         self._shutdown = True
         self._feature_timer.stop()
         self._kokoro.close()
+        if self._offline is not None:
+            self._offline.close()
+        for service in self._retired_offline:
+            service.close()
         if self._activity is not None:
             self._activity.close()
         self.shutdownImports()
@@ -1371,7 +1489,8 @@ class DesktopBridge(QObject):
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
         self._playback.shutdown(2.0)
         try:
-            self._flush_reader_progress()
+            if not self._maintenance:
+                self._flush_reader_progress()
         except ReaderServiceError as exc:
             self._emit_error(exc.code, exc.user_message)
         finally:
@@ -1381,6 +1500,8 @@ class DesktopBridge(QObject):
                     close_reader()
                 except ReaderServiceError as exc:
                     self._emit_error(exc.code, exc.user_message)
+
+        return True
 
     def _flush_reader_progress(self, *, wait=True) -> None:
         cancel_preview = getattr(self._playback, "cancel_preview", None)
@@ -1490,6 +1611,8 @@ class DesktopBridge(QObject):
             self.importFinished.emit(_json(event))
 
     def _drain_reader_events(self) -> None:
+        if self._maintenance:
+            return
         errors = getattr(self._reader, "progress_errors", None)
         if callable(errors):
             for exc in errors():
@@ -1547,7 +1670,7 @@ class DesktopBridge(QObject):
                     self._activity.record_audio(enabled, transition["at"])
                 elif event.get("reason") == "state" and event.get("playback", {}).get("phase") != "speaking" and self._activity.flags[1]:
                     self._activity.record_audio(False, time.monotonic())
-            if event.get("playback", {}).get("purpose", "book") != "preview" and event.get("reason") in {"sentenceDone", "finished"}:
+            if event.get("playback", {}).get("purpose", "book") != "preview" and event.get("reason") in {"sentenceDone", "finished", "sleepStopped"}:
                 position = event.get("playback", {}).get("position", {})
                 try:
                     self._reader.update_position(
@@ -1558,6 +1681,8 @@ class DesktopBridge(QObject):
                 except ReaderServiceError as exc:
                     self._emit_error(exc.code, exc.user_message)
             self.readerPlaybackChanged.emit(_json(event))
+            if event.get("reason") == "sleepStopped":
+                self._flush_reader_progress(wait=False)
             if event.get("reason") == "finished":
                 flush = getattr(self._reader, "flush_progress", None)
                 if callable(flush):
@@ -1659,6 +1784,13 @@ class DesktopBridge(QObject):
         if callable(cancel_preview):
             cancel_preview()
         speech = self._playback.speech_controller
+        setter = getattr(speech, "set_tts_cache_dir", None)
+        if callable(setter):
+            from .feature_store import read_library
+            settings_store = read_library(self._organization.path).get("settings", {})
+            cache_root = str(settings_store.get("tts_cache_dir") or self._feature_root / "tts_cache")
+            if getattr(speech, "_tts_cache_dir", None) != cache_root:
+                setter(cache_root)
         voice_id = settings.get("ttsVoiceId")
         speech.set_voice(str(voice_id or ""))
         speech.set_rate(settings.get("ttsRate", 200))
@@ -1699,6 +1831,141 @@ class DesktopBridge(QObject):
             "loadingLocalVoices": self._local_voices_loading,
             "localVoiceError": self._local_voice_error,
         }
+
+    def _backup_service(self):
+        if self._backup is None:
+            from .backup_service import BackupService
+            self._backup = BackupService(self._feature_root, self._organization.path)
+        return self._backup
+
+    def _backup_action(self, action, request):
+        from PySide6.QtWidgets import QFileDialog
+        backup = self._backup_service()
+        if action in {"backupJob", "backupCancel"}:
+            result = backup.cancel(request.get("jobId")) if action == "backupCancel" else backup.state(request.get("jobId"))
+            self._finish_restore_if_ready()
+            return result
+        options = {"include_audio": request.get("includeAudio", False), "include_models": request.get("includeModels", False)}
+        if any(type(value) is not bool for value in options.values()):
+            raise FeatureError("INVALID_REQUEST", "备份选项无效。")
+        if action == "backupInventory":
+            return backup.start("inventory", **options)
+        if action == "backupCreate":
+            self._flush_reader_progress()
+            self._tick_activity()
+            if self._activity is not None:
+                self._activity.flush()
+            path, _ = QFileDialog.getSaveFileName(self._window, "保存阅读器备份", "QYReader-backup.zip", "阅读器备份 (*.zip)")
+            return backup.start("create", destination=path, **options) if path else {"cancelled": True}
+        if action == "backupInspect":
+            path, _ = QFileDialog.getOpenFileName(self._window, "选择阅读器备份", "", "阅读器备份 (*.zip)")
+            return backup.start("inspect", archive=path) if path else {"cancelled": True}
+        # Reject before shutting down any writers if this preview is stale.
+        if request.get("previewId") not in backup.previews:
+            raise FeatureError("BACKUP_PREVIEW_EXPIRED", "恢复预览已失效，请重新选择备份。")
+        self._retired_offline = [service for service in self._retired_offline if service.thread.is_alive()]
+        if self._retired_offline:
+            raise FeatureError("RESTORE_BUSY", "旧离线任务尚在结束，请稍后再恢复。", True)
+        if self._active_job_id or self._reader_open_request_id or self._software_update_thread is not None:
+            raise FeatureError("RESTORE_BUSY", "请等待导入、打开书籍或软件更新完成后再恢复。", True)
+        if self._kokoro.snapshot()["status"] in {"downloading", "verifying", "extracting", "loading"}:
+            raise FeatureError("RESTORE_BUSY", "请等待模型准备结束后再恢复。", True)
+        if self._offline is not None and any(job["state"] in {"queued", "preparing", "running"} for job in self._offline.state()["jobs"]):
+            raise FeatureError("RESTORE_BUSY", "请先暂停离线章节任务，再恢复数据。", True)
+        identity = self._playback.session_identity()
+        if identity.get("sessionId"):
+            self._playback.control("stop", session_id=identity["sessionId"])
+        self._flush_reader_progress()
+        load_future = self._kokoro.load_future
+        if (load_future is not None and not load_future.done()) or any(not future.done() for future in self._kokoro.futures.values()):
+            raise FeatureError("RESTORE_BUSY", "正在结束离线音频生成，请稍后再恢复。", True)
+        self._maintenance = True
+        try:
+            if self._search_cancel is not None:
+                self._search_cancel.set()
+            self._reader.shutdown()
+            if self._activity is not None:
+                self._tick_activity()
+                self._activity.close()
+                self._activity = None
+            if self._offline is not None:
+                self._offline.close()
+                if self._offline.thread.is_alive():
+                    raise FeatureError("RESTORE_BUSY", "离线任务尚在结束，请稍后再恢复。", True)
+            self._kokoro.close()
+            self._kokoro.executor.thread.join(timeout=.5)
+            if self._kokoro.executor.thread.is_alive():
+                raise FeatureError("RESTORE_BUSY", "模型线程尚在结束，请稍后再恢复。", True)
+            self._kokoro.engine = None
+            self._kokoro.load_future = None
+            result = backup.start("restore", preview_id=request.get("previewId"))
+            self._restore_job = result["jobId"]
+            self._finish_restore_if_ready()
+            return result
+        except Exception as exc:
+            self._reload_data_services()
+            self._maintenance = False
+            self.featuresChanged.emit(_json({"schemaVersion": SCHEMA_VERSION, "kind": "restore", "data": {
+                "kind": "restore", "status": "error", "error": {"code": getattr(exc, "code", "RESTORE_FAILED"), "message": getattr(exc, "user_message", "恢复未能启动，原数据保持可用。"), "retryable": True}}}))
+            raise
+
+    def _finish_restore_if_ready(self):
+        if not self._restore_job:
+            return
+        state = self._backup.state(self._restore_job)
+        if state["status"] == "running":
+            return
+        self._restore_job = ""
+        self._reload_data_services()
+        self._maintenance = False
+        self.featuresChanged.emit(_json({"schemaVersion": SCHEMA_VERSION, "kind": "restore", "data": state}))
+        self._emit_floating_state()
+
+    def _reload_data_services(self):
+        if self._offline is not None and self._offline.thread.is_alive() and self._offline not in self._retired_offline:
+            self._retired_offline.append(self._offline)
+        self._kokoro.close()
+        self._playback.clear_session()
+        self._reader = ReaderService(self._organization.path, deferred_progress=True)
+        self._kokoro = KokoroService(self._feature_root, lambda state: self._feature_events.put(("model", state)))
+        self._playback.speech_controller.set_kokoro_service(self._kokoro)
+        self._offline = None
+        visible = self._floating.visible
+        self._floating = FloatingReaderService(self._playback, self._organization.path)
+        if visible:
+            self._floating.show()
+        self._active_status_book = ""
+        while True:
+            try:
+                self._reader_events.get_nowait()
+            except queue.Empty:
+                break
+
+    def _offline_cache_service(self):
+        if self._offline is None:
+            from .offline_cache_service import OfflineCacheService
+            def protected(job):
+                return self._playback.snapshot()["status"] in {"playing", "paused"} and self._playback.session_identity().get("bookId") == job.get("bookId")
+            self._offline = OfflineCacheService(self._feature_root, self._kokoro,
+                notify=lambda state: self._feature_events.put(("cache", state)), protected=protected)
+            # The same legacy directory is read by the one speech controller.
+            setter = getattr(self._playback.speech_controller, "set_tts_cache_dir", None)
+            if callable(setter):
+                setter(str(self._offline.cache_root))
+        return self._offline
+
+    def _voice_center_state(self):
+        voices = self._speech_state()["voices"]
+        favorites = self._voice_preferences.favorites()
+        for voice in voices:
+            voice["available"] = voice.get("available", True)
+            voice["unavailableReason"] = "请先安装所选版本的Kokoro模型" if not voice["available"] else ""
+            voice["statusLabel"] = "需联网" if voice.get("requiresNetwork") else "离线" if voice["available"] else "未安装模型"
+        known = {x["id"] for x in voices}
+        for voice_id in favorites:
+            if voice_id not in known:
+                voices.append({"id": voice_id, "label": voice_id or "系统默认音色", "backend": "sapi", "requiresNetwork": False, "available": False, "unavailableReason": "此系统音色当前未安装，收藏已保留", "statusLabel": "不可用"})
+        return {"voices": voices, "favorites": favorites, "playback": self._playback.snapshot()}
 
     @staticmethod
     def _edge_voice_options() -> list[dict[str, Any]]:

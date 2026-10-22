@@ -847,3 +847,49 @@ input.floating-progress-slider { --progress-fill: linear-gradient(to right, var(
 .heatmap-day.level-3 { background: color-mix(in srgb, var(--ui-accent) 70%, var(--ui-raised)); }
 .heatmap-day.level-4 { background: var(--ui-accent); }
 @media (max-width: 850px) { .kokoro-voices { grid-template-columns: repeat(2,minmax(0,1fr)); } .statistics-cards { gap: 8px; } .statistics-cards > section { padding: 12px; } .statistics-cards strong { font-size: 18px; } }
+
+.sleep-timer-control { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 11px; min-width: 0; }
+.sleep-timer-control select { max-width: 128px; border: 0; background: transparent; color: inherit; font: inherit; padding: 4px; cursor: pointer; }
+.sleep-timer-control small { color: var(--ui-accent); }
+.floating-controls .sleep-timer-control { flex: 0 1 auto; }
+@media (max-width: 480px) { .floating-opacity-control { max-width: 95px; } .sleep-timer-control select { max-width: 95px; } }
+
+.voice-center input[type="search"] { min-width: 180px; flex: 1; }
+.voice-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+.voice-row > button:first-child { flex: 1; min-width: 140px; text-align: left; border: 1px solid var(--ui-border); border-radius: 10px; background: var(--ui-panel); color: inherit; padding: 8px 10px; }
+.voice-row small { display: block; opacity: .7; font-size: 11px; margin-top: 3px; }
+.voice-row > button.selected { border-color: var(--ui-accent); }
+.voice-group h4 { margin: 14px 0 8px; }
+
+.library-batch-controls { flex-wrap: wrap; margin: 12px 0; }
+.library-batch-controls > span { font-size: 12px; }
+.book-card.batch-selected { outline: 2px solid var(--ui-accent); outline-offset: 4px; border-radius: 14px; }
+.book-selection { position: absolute; top: 9px; left: 9px; z-index: 3; padding: 4px; background: var(--ui-panel); border-radius: 6px; }
+.book-selection input { width: 18px; height: 18px; accent-color: var(--ui-accent); }
+
+.offline-cache-panel { min-width: 0; }
+.offline-cache-panel progress { width: 100%; }
+.offline-cache-panel .feature-actions { flex-wrap: wrap; }
+.backup-panel .model-directory { overflow-wrap: anywhere; }
+
+.sleep-timer-backdrop { --ui-panel: #f5f6f8; --ui-raised: #fff; --ui-text: #272c35; --ui-muted: #626c7b; --ui-border: #dce0e7; --ui-accent: #5361c5; color: var(--ui-text); z-index: 1000; }
+.sleep-timer-modal { width: min(360px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; padding: 20px; background: var(--ui-panel); }
+.sleep-timer-modal h3 { margin: 0 0 8px; }
+.sleep-timer-modal .settings-field { margin: 10px 0; }
+.sleep-timer-modal input { width: 100px; }
+
+/* Reserve explicit columns for the shared timer instead of shrinking controls. */
+.native-reader .player-bar { grid-template-columns: minmax(100px, 160px) 132px minmax(120px, 1fr) 282px; }
+.player-tools .sleep-timer-control { flex: 0 1 120px; }
+.sleep-timer-control select { width: 100%; min-width: 0; }
+.native-floating-surface .floating-controls { grid-template-columns: 112px minmax(80px, 1fr) minmax(82px, 108px) 28px; gap: 4px 6px; }
+.native-floating-surface .floating-resize-control { width: 28px; height: 28px; }
+@media (max-width: 800px) {
+  .native-reader .player-bar { grid-template-columns: minmax(0, 1fr) 108px auto; gap: 6px; }
+  .native-reader .player-tools .icon-button { flex-basis: 30px; width: 30px; }
+  .native-reader .player-tools .sleep-timer-control { flex-basis: 100px; }
+}
+@media (max-width: 430px) {
+  .native-floating-surface .floating-controls { grid-template-columns: 96px minmax(70px, 1fr) minmax(60px, 82px) 24px; gap: 4px; }
+  .native-floating-surface .floating-resize-control { width: 24px; }
+}

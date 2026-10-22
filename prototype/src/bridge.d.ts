@@ -259,7 +259,11 @@ export interface ReaderSentence {
 
 export type PlaybackStatus = "idle" | "playing" | "paused" | "finished" | "error";
 
+export interface SleepTimerState { mode: "off" | "minutes" | "chapter"; remainingMs: number; bookId: string; chapterIndex: number | null; endReason: string; version: number; }
+
 export interface ReaderPlaybackSnapshot {
+  sleepTimer?: SleepTimerState;
+  preview?: { status: "idle" | "playing" | "completed" | "cancelled" | "error"; voiceId: string; error: BridgeError | null };
   status: PlaybackStatus;
   position: ReaderPosition;
   sentence: ReaderSentence | null;
@@ -404,9 +408,11 @@ export interface ReaderPlaybackEvent {
     | "state"
     | "sentenceStart"
     | "sentenceDone"
+    | "sleepStopped"
     | "buffering"
     | "finished"
     | "fallback"
+    | "recovered"
     | "error";
   playback: ReaderPlaybackSnapshot;
   error: BridgeError | null;
@@ -562,6 +568,7 @@ export interface BridgeConnection {
   library: LibraryControls;
   reader: ReaderControls;
   floating: FloatingReaderControls;
+  onFeaturesChanged(callback: (event: { schemaVersion: 2; kind: string; data: Record<string, unknown> }) => void): () => void;
   onBridgeError(callback: (payload: string) => void): void;
   onWindowStateChanged(callback: (state: { isMaximized: boolean; isFullScreen: boolean }) => void): void;
   onWindowInteractionChanged(callback: (state: { surface: "main" | "floating"; active: boolean }) => void): () => void;
@@ -589,21 +596,43 @@ export interface ModelState {
 }
 export interface TimeSummary { readingMs: number; listeningMs: number; overlapMs: number; totalMs: number }
 export interface StatisticsState { today: TimeSummary; total: TimeSummary; days: (TimeSummary & { date: string })[] }
+export interface OfflineCacheJob { jobId: string; bookId: string; bookTitle?: string; chapterIndices: number[]; backend: "edge" | "kokoro"; voiceId: string; rate: number; modelId: string; modelSha256: string; state: "queued" | "preparing" | "running" | "paused" | "cancelled" | "completed" | "error"; done: number; total: number; bytes: number; verified: boolean; fingerprint: string; chapters: {index: number; done: number; total: number}[]; error: BridgeError | null; message: string; }
+export interface OfflineCacheState { jobs: OfflineCacheJob[]; cacheRoot: string; }
+export interface BackupMissing { bookId: string; kind: string; message: string; }
+export interface BackupInventory { bookCount: number; noteCount: number; estimatedBytes: number; fileCount: number; missing: BackupMissing[]; targetRoot: string; includeAudio: boolean; includeModels: boolean; }
+export interface BackupPreview { previewId: string; bookCount: number; noteCount: number; bytes: number; statisticsRange: (string | null)[]; missing: BackupMissing[]; targetRoot: string; replaceNames: string[]; rollbackEstimatedBytes?: number; }
+export interface BackupJob { jobId: string; kind: "inventory" | "create" | "inspect" | "restore"; status: "running" | "completed" | "cancelled" | "error"; error: BridgeError | null; result: BackupInventory | BackupPreview | { path: string; complete: boolean; restored?: boolean; rollbackDirectory?: string; rollbackArchive?: string } | null; }
+export interface VoiceCenterState { voices: (SpeechVoiceOption & { available: boolean; unavailableReason: string; statusLabel: string })[]; favorites: string[]; playback: ReaderPlaybackSnapshot; }
 export type ReaderFeatureResult<T extends ReaderFeatureRequest> =
   T["action"] extends "modelState" | "modelVariant" | "modelDownload" | "modelRetry" | "modelCancel" | "modelImport" | "modelDirectory" ? ModelState :
   T["action"] extends "statistics" ? StatisticsState :
   T["action"] extends "organizationState" | "organizationUpdate" ? { categories: ShelfTerm[]; tags: ShelfTerm[] } :
   T["action"] extends "updateNote" ? ReaderBookmark :
   T["action"] extends "exportNotes" ? { saved: boolean; cancelled: boolean } :
+  T["action"] extends "sleepTimer" | "sleepTimerState" ? SleepTimerState :
+  T["action"] extends "cacheState" ? OfflineCacheState :
+  T["action"] extends "cacheCreate" | "cacheControl" ? OfflineCacheJob :
+  T["action"] extends "backupInventory" | "backupCreate" | "backupInspect" | "backupRestore" | "backupJob" | "backupCancel" ? BackupJob | { cancelled: true } :
+  T["action"] extends "voiceCenter" | "voiceFavorite" ? VoiceCenterState :
   T["action"] extends "previewVoice" ? ReaderPlaybackCommandData : { accepted: boolean };
 export type ReaderFeatureRequest =
   | { action: "modelState" | "modelDownload" | "modelRetry" | "modelCancel" | "modelImport" | "modelDirectory" | "organizationState" | "statistics" }
   | { action: "modelVariant"; variant: "int8" | "fp32" }
+  | { action: "sleepTimer"; mode: "off" | "minutes" | "chapter"; minutes?: number }
+  | { action: "sleepTimerState" }
+  | { action: "cacheState" }
+  | { action: "cacheCreate"; bookId: string; chapterIndices: number[]; backend: "edge" | "kokoro"; voiceId: string; rate: number }
+  | { action: "cacheControl"; jobId: string; command: "pause" | "resume" | "cancel" | "verify" | "repair" | "clean"; confirmed?: boolean }
+  | { action: "backupInventory" | "backupCreate" | "backupInspect"; includeAudio?: boolean; includeModels?: boolean }
+  | { action: "backupRestore"; previewId: string }
+  | { action: "backupJob" | "backupCancel"; jobId: string }
+  | { action: "voiceCenter" | "cancelPreview" }
+  | { action: "voiceFavorite"; voiceId: string; favorite: boolean }
   | { action: "previewVoice"; voiceId: string }
   | { action: "updateNote"; sessionId: string; bookmarkId: string; patch: { note?: string; color?: string } }
   | { action: "exportNotes"; sessionId: string; format: "md" | "txt" }
   | { action: "activity"; surface: "main" | "floating"; sessionId: string; visible: boolean; inputSequence: number }
-  | { action: "organizationUpdate"; request: { action: "book" | "create" | "rename" | "delete"; bookId?: string; patch?: Partial<Pick<BookSummary, "contentType" | "categoryId" | "tagIds" | "readingStatus" | "statusMode">>; kind?: "categories" | "tags"; id?: string; name?: string } };
+  | { action: "organizationUpdate"; request: { action: "book" | "batch" | "create" | "rename" | "delete"; bookIds?: string[]; bookId?: string; patch?: Partial<Pick<BookSummary, "contentType" | "categoryId" | "tagIds" | "readingStatus" | "statusMode">> & { addTagIds?: string[]; removeTagIds?: string[] }; kind?: "categories" | "tags"; id?: string; name?: string } };
 
 export class BridgeProtocolError extends Error {
   code: string;

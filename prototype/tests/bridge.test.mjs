@@ -932,3 +932,22 @@ test("floating footer replaces bilingual control with a native bottom-right resi
   assert.match(css, /\.floating-resize-control:hover/);
   assert.match(css, /cursor: nwse-resize;/);
 });
+
+
+test("native sleep and feature contracts reject malformed payloads and dispose restore events", async () => {
+  const env = nativeEnvironment(createDemoInitialState());
+  env.nativeBridge.featuresChanged = signal();
+  let data = { mode: "minutes", remainingMs: 60000, bookId: "book", chapterIndex: 0, endReason: "", version: 1 };
+  env.nativeBridge.readerFeatureAction = (input, callback) => callback(JSON.stringify({ schemaVersion: 2, ok: true, data, error: null }));
+  const c = await connectBridge({ window: env.browserWindow, document: null });
+  assert.equal((await c.features.invoke({ action: "sleepTimerState" })).data.remainingMs, 60000);
+  data = { ...data, remainingMs: -1 };
+  await assert.rejects(c.features.invoke({ action: "sleepTimerState" }), (e) => e.code === "BRIDGE_INVALID_PAYLOAD");
+  data = { voices: [], favorites: [] };
+  await assert.rejects(c.features.invoke({ action: "voiceCenter" }), (e) => e.code === "BRIDGE_INVALID_PAYLOAD");
+  const events = [];
+  c.onFeaturesChanged((event) => events.push(event));
+  env.nativeBridge.featuresChanged.emit(JSON.stringify({ schemaVersion: 2, kind: "restore", data: { status: "error" } }));
+  assert.equal(events[0].data.status, "error");
+  c.dispose(); assert.equal(env.nativeBridge.featuresChanged.size, 0);
+});

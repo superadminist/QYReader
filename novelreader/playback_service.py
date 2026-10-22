@@ -12,6 +12,7 @@ import uuid
 from collections import deque
 
 from .textproc import clean_to_orig
+from .sleep_timer import SleepTimer
 
 
 SCHEMA_VERSION = 2
@@ -23,10 +24,13 @@ PLAYBACK_COMMANDS = frozenset(
 class PlaybackService:
     """把一个阅读会话绑定到宿主提供的唯一 ``SpeechController``。"""
 
-    def __init__(self, speech_controller):
+    def __init__(self, speech_controller, *, clock=None):
         if speech_controller is None:
             raise ValueError("speech_controller is required")
+        self._sleep = SleepTimer(**({"clock": clock} if clock else {}))
         self._speech = speech_controller
+        self._speech.sleep_timer = self._sleep
+        self._sleep_display = None
         self._lock = threading.RLock()
         self._session_id = ""
         self._book_id = ""
@@ -47,12 +51,16 @@ class PlaybackService:
         self._closed = False
         self._purpose = "book"
         self._preview_context = None
+        self._preview_result = {"status": "idle", "voiceId": "", "error": None}
         self._audio_transition_pending = None
 
     def preview(self, text, voice_id):
         from .book_loader import BookContent, Chapter
         with self._lock:
             self._ensure_open()
+            if self.tick_sleep_timer():
+                return {"commandId": uuid.uuid4().hex, "accepted": False}
+            self._flush_speech_events()
             if self._preview_context is not None:
                 self._restore_preview()
             speech = self._speech
@@ -71,6 +79,7 @@ class PlaybackService:
             self._sentence = None
             self._sentence_cache.clear()
             self._purpose = "preview"
+            self._preview_result = {"status": "playing", "voiceId": voice_id, "error": None}
             speech.set_voice(voice_id)
             self._generation = speech.start(self._book, 0, 0)
             self._status = "playing"
@@ -85,6 +94,8 @@ class PlaybackService:
             return
         book, session, bid, ci, off, sentence, status, voice = self._preview_context
         self._preview_context = None
+        if self._preview_result["status"] == "playing":
+            self._preview_result["status"] = "cancelled"
         self._generation = self._speech.stop()
         self._speech.set_voice(voice)
         self._book, self._session_id, self._book_id = book, session, bid
@@ -98,6 +109,8 @@ class PlaybackService:
     def cancel_preview(self):
         with self._lock:
             if self._preview_context is not None:
+                self._flush_speech_events()
+                self._preview_result["status"] = "cancelled"
                 self._restore_preview()
                 self._queue_event("state")
 
@@ -125,6 +138,8 @@ class PlaybackService:
             if self._preview_context is not None:
                 self._restore_preview()
             self._generation = self._speech.stop()
+            if self._sleep.mode == "chapter":
+                self._sleep.cancel("bookChanged")
             self._session_id = str(session_id)
             self._book_id = str(book_id)
             self._book = book
@@ -155,6 +170,7 @@ class PlaybackService:
             self._chapter_index, self._char_offset = self._clamp_position(
                 chapter_index, char_offset
             )
+            self._cancel_chapter_on_navigation()
             self._sentence = None
             if self._status == "playing":
                 self._generation = self._speech.start(
@@ -183,14 +199,21 @@ class PlaybackService:
             raise ValueError("unsupported playback command")
         command_id = str(command_id or uuid.uuid4().hex)
         with self._lock:
+            self._ensure_bound()
+            if session_id is not None and str(session_id) != self._session_id:
+                raise RuntimeError("reader session is not bound")
+            expired = self.tick_sleep_timer()
+            if command == "play" and expired:
+                return {"commandId": command_id, "accepted": False}
+            if command == "stop":
+                self._sleep.cancel("manualStop")
+                self._queue_event("state")
             if self._preview_context is not None:
                 self._restore_preview()
                 self._queue_event("state")
                 if command == "stop":
                     return {"commandId": command_id, "accepted": True}
-            self._ensure_bound()
-            if session_id is not None and str(session_id) != self._session_id:
-                raise RuntimeError("reader session is not bound")
+                self._ensure_bound()
             # A sentence can start between the last Qt poll and this Pause
             # click. Keep the last visible lyric while flushing that queued
             # start; publish it only after audio is confirmed on Resume.
@@ -218,8 +241,45 @@ class PlaybackService:
                 "activeBackend": self._active_backend,
                 "fallbackActive": self._fallback_active,
                 "purpose": self._purpose,
+                "sleepTimer": self._sleep.snapshot(),
+                "preview": dict(self._preview_result),
                 "phase": "speaking" if getattr(self._speech, "is_audible", lambda: False)() else "buffering" if self._status == "playing" else self._status,
             }
+
+    def set_sleep_timer(self, mode, minutes=None):
+        with self._lock:
+            self._ensure_open()
+            self._flush_speech_events()
+            if self._preview_context is not None:
+                book, _session, bid, ci, *_rest = self._preview_context
+            else:
+                book, bid, ci = self._book, self._book_id, self._chapter_index
+            result = self._sleep.set(mode, minutes, bid, ci, book)
+            self._queue_event("state")
+            return result
+
+    def tick_sleep_timer(self):
+        with self._lock:
+            if self._sleep.expired():
+                self._flush_speech_events()
+                if self._preview_context is not None:
+                    self._preview_result["status"] = "cancelled"
+                    self._restore_preview()
+                self._sleep.cancel("expired")
+                self._stop()
+                self._generation = self._speech.stop()
+                self._queue_event("sleepStopped")
+                return True
+            state = self._sleep.snapshot()
+            display = (state["version"], state["remainingMs"] // 1000)
+            if state["mode"] != "off" and display != self._sleep_display:
+                self._sleep_display = display
+                self._queue_event("state")
+            return False
+
+    def _cancel_chapter_on_navigation(self):
+        if self._sleep.mode == "chapter" and (self._book_id != self._sleep.book_id or self._chapter_index != self._sleep.chapter):
+            self._sleep.cancel("chapterChanged")
 
     def prepare_current(self):
         """Warm the bound position without creating another playback state."""
@@ -287,8 +347,10 @@ class PlaybackService:
         """唯一底层 drain 入口，返回冻结的 ReaderPlaybackEvent 快照。"""
         with self._lock:
             self._ensure_open()
+            self.tick_sleep_timer()
             self._flush_speech_events()
             if self._purpose == "preview" and self._status in {"finished", "error"}:
+                self._preview_result["status"] = "completed" if self._status == "finished" else "error"
                 self._restore_preview()
                 self._queue_event("state")
             output = list(self._pending_events)
@@ -328,6 +390,24 @@ class PlaybackService:
             self._queue_event("state")
             return self.snapshot()
 
+    def clear_session(self):
+        """Drop a restored data snapshot's old binding, reusing the same controller."""
+        with self._lock:
+            self.cancel_preview()
+            self._generation = self._speech.stop()
+            self._sleep.cancel("dataRestored")
+            self._book = None
+            self._session_id = self._book_id = ""
+            self._chapter_index = self._char_offset = 0
+            self._status = "idle"
+            self._sentence = None
+            self._active_backend = None
+            self._fallback_active = False
+            self._terminal_generation = None
+            self._deferred_sentence_start = None
+            self._sentence_cache.clear()
+            self._pending_events.clear()
+
     def shutdown(self, timeout=2.0):
         """停止唯一控制器；等待有上限，返回工作线程是否已退出。"""
         with self._lock:
@@ -335,6 +415,7 @@ class PlaybackService:
                 self._restore_preview()
             if self._closed:
                 return True
+            self._sleep.cancel("shutdown")
             self._closed = True
             self._status = "idle"
             self._sentence = None
@@ -399,6 +480,7 @@ class PlaybackService:
         active = self._speech.is_active()
         self._chapter_index = chapter_index
         self._char_offset = char_offset
+        self._cancel_chapter_on_navigation()
         if not active:
             self._sentence = None
         self._deferred_sentence_start = None
@@ -474,6 +556,18 @@ class PlaybackService:
                 self._sentence = None
                 return self._event("state")
             return None
+        if event_type == "sleep_stopped":
+            self._chapter_index, self._char_offset = self._clamp_position(raw["chapter_idx"], raw["char_offset"])
+            matches_timer = raw.get("timerVersion") == self._sleep.version and self._sleep.mode == "chapter"
+            if matches_timer:
+                self._sleep.cancel("chapterEnd")
+            self._status = "idle"
+            self._sentence = None
+            self._active_backend = None
+            self._fallback_active = False
+            self._deferred_sentence_start = None
+            self._terminal_generation = generation
+            return self._event("sleepStopped" if matches_timer else "state")
         if event_type == "finished":
             self._chapter_index = len(self._book.chapters) - 1
             self._char_offset = len(self._book.chapters[self._chapter_index].content)
@@ -492,6 +586,8 @@ class PlaybackService:
             details = raw.get("details")
             if isinstance(details, dict):
                 error["details"] = dict(details)
+            if self._purpose == "preview":
+                self._preview_result["error"] = error
             fallback_backend = raw.get("fallback_backend")
             if fallback_backend:
                 self._fallback_active = True

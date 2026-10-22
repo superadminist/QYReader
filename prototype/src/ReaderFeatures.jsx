@@ -22,7 +22,7 @@ export function ActivityReporter({ features, surface, sessionId, visible }) {
   return null;
 }
 
-export function KokoroPanel({ features, voices, selectedVoice, onSelect }) {
+export function KokoroPanel({ features, voices, selectedVoice, onSelect, showVoices = true }) {
   const [state, setState] = useState(null);
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
@@ -65,7 +65,8 @@ export function KokoroPanel({ features, voices, selectedVoice, onSelect }) {
     {state?.playback?.purpose === "preview" ? <p className="settings-hint" role="status">{state.playback.phase === "speaking" ? "正在试听" : "正在生成试听音频…"} · {voices.find((voice) => voice.id === state.playback.requestedVoiceId)?.label || "离线音色"}</p> : null}
     {error ? <p className="reader-side-error" role="alert">{error}</p> : null}
     <div className="feature-actions"><button className="primary-button" disabled={!features || pending || state?.status === "ready"} onClick={() => action(busy ? "modelCancel" : state?.status === "error" ? "modelRetry" : "modelDownload")}>{busy ? "取消下载 / 安装" : state?.status === "error" ? "重试下载" : state?.status === "ready" ? "模型已安装" : "下载模型"}</button><button className="secondary-button" disabled={busy || pending || !features} onClick={() => action("modelImport")}>导入模型包</button><button className="secondary-button" disabled={busy || pending || !features} onClick={() => action("modelDirectory")}>选择目录</button></div>
-    <div className="kokoro-voices">{voices.map((voice) => <div key={voice.id}><button className={selectedVoice === voice.id ? "selected" : ""} disabled={!voice.available} onClick={() => onSelect({ ttsVoiceId: voice.id })}>{voice.label.replace(" · Kokoro离线", "")}</button><button disabled={!voice.available || pending} aria-label={`试听${voice.label}`} onClick={() => action("previewVoice", { voiceId: voice.id })}>试听</button></div>)}</div>
+    {showVoices ? <div className="kokoro-voices">{voices.map((voice) => <div key={voice.id}><button className={selectedVoice === voice.id ? "selected" : ""} disabled={!voice.available} onClick={() => onSelect({ ttsVoiceId: voice.id })}>{voice.label.replace(" · Kokoro离线", "")}</button><button disabled={!voice.available || pending} aria-label={`试听${voice.label}`} onClick={() => action("previewVoice", { voiceId: voice.id })}>试听</button></div>)}</div>
+    : null}
     <p className="settings-hint">试听会暂停书籍朗读，不改变默认音色或进度；结束后可手动继续。</p>
   </section>;
 }

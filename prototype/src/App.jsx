@@ -34,6 +34,11 @@ import {
 import { connectBridge } from "./bridge.js";
 import { ActivityReporter, BookOrganizer, KokoroPanel, NOTE_COLORS, NoteEditor, ShelfFilters, StatisticsView, STATUS_NAMES } from "./ReaderFeatures.jsx";
 import { readerSelectionFromRange } from "./readerPosition.js";
+import BatchLibraryControls, { toggleLibrarySelection } from "./BatchLibraryControls.jsx";
+import BackupPanel from "./BackupPanel.jsx";
+import OfflineCachePanel from "./OfflineCachePanel.jsx";
+import VoiceCenter from "./VoiceCenter.jsx";
+import SleepTimerControl from "./SleepTimerControl.jsx";
 import AnnotationPopover from "./AnnotationPopover.jsx";
 import { floatingLyricTransition, floatingSentenceIdentity } from "./floatingLyrics.js";
 import {
@@ -358,6 +363,8 @@ const Library = memo(function Library({
   cancelImport,
   openAfterImportBookId,
 }) {
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState([]);
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState({ type: "all", category: "all", status: "all", tags: [] });
   const [taxonomy, setTaxonomy] = useState({ categories: [], tags: [{ id: "to-read", name: "待读", builtin: true }] });
@@ -391,7 +398,7 @@ const Library = memo(function Library({
     && (filters.status === "all" || (book.readingStatus || (book.progressPercent >= 100 ? "read" : book.progressPercent > 0 ? "reading" : "unread")) === filters.status)
     && filters.tags.every((tag) => (book.tagIds || []).includes(tag))), [orderedBooks, normalizedQuery, filters]);
   const filtering = filters.type !== "all" || filters.category !== "all" || filters.status !== "all" || filters.tags.length > 0;
-  const canDrag = sortMode === "manual" && !normalizedQuery && !filtering && !loading && !sortPending;
+  const canDrag = !selectionMode && sortMode === "manual" && !normalizedQuery && !filtering && !loading && !sortPending;
   const totalRows = Math.ceil(visibleBooks.length / gridViewport.columns);
   // Keep several screens mounted and advance in batches. The software Qt
   // compositor otherwise rasterizes newly mounted covers on every scroll row.
@@ -617,13 +624,15 @@ const Library = memo(function Library({
       ) : null}
       <div className="section-title"><div><h2>{sortMode === "manual" ? "自定义排序" : "最近阅读"}</h2><span>{visibleBooks.length} 项内容</span></div><div className="library-sort-control" role="group" aria-label="内容库排序方式"><button className={sortMode !== "manual" ? "selected" : ""} disabled={sortPending} onClick={() => changeSortMode("recent")}>最近阅读</button><button className={sortMode === "manual" ? "selected" : ""} disabled={sortPending} onClick={() => changeSortMode("manual")}>自定义排序</button></div></div>
       {sortMode === "manual" ? <p className="library-sort-hint" role="status">{normalizedQuery || filtering ? "搜索或筛选期间暂停拖动，清空后即可调整顺序。" : sortPending ? "正在保存排序…" : "拖动卡片调整顺序，阅读不会改变排列。"}</p> : null}
+      <BatchLibraryControls selectionMode={selectionMode} onSelectionModeChange={setSelectionMode} selectedIds={selectedIds} filteredIds={visibleBooks.map((book) => book.id)} onSelectionChange={setSelectedIds} taxonomy={taxonomy} features={features} onUpdated={() => { refreshTerms(); return onReload(); }} />
       <div ref={gridRef} className={`book-grid ${canDrag ? "sortable" : ""} ${virtualLibrary ? "virtual-library" : ""}`} style={virtualLibrary && visibleBooks.length ? { paddingTop: firstRow * gridViewport.rowHeight, paddingBottom: Math.max(0, totalRows - Math.max(firstRow + 1, endRow)) * gridViewport.rowHeight } : undefined}>
         {renderedBooks.map((book) => (
-          <div key={book.id} data-book-id={book.id} className={`book-card ${book.id === draggedId ? "dragging" : ""} ${book.id === openAfterImportBookId ? "just-imported" : ""}`} onContextMenu={(event) => showBookMenu(event, book)} onPointerDown={(event) => startDrag(event, book)} onPointerMove={moveDrag} onPointerUp={finishDrag} onPointerCancel={cancelDrag}>
-            <button className="book-open" aria-label={`阅读 ${book.title}`} aria-disabled={!readerEnabled} onClick={() => { if (!suppressOpenRef.current) openBook(book); }}>
+          <div key={book.id} data-book-id={book.id} className={`book-card ${selectionMode && selectedIds.includes(book.id) ? "batch-selected" : ""} ${book.id === draggedId ? "dragging" : ""} ${book.id === openAfterImportBookId ? "just-imported" : ""}`} onContextMenu={(event) => showBookMenu(event, book)} onPointerDown={(event) => { if (!selectionMode) startDrag(event, book); }} onPointerMove={moveDrag} onPointerUp={finishDrag} onPointerCancel={cancelDrag}>
+            <button className="book-open" aria-label={`${selectionMode ? "选择" : "阅读"} ${book.title}`} aria-disabled={!selectionMode && !readerEnabled} onClick={() => { if (selectionMode) setSelectedIds((ids) => toggleLibrarySelection(ids, book.id)); else if (!suppressOpenRef.current) openBook(book); }}>
               <div className="cover-wrap"><img src={book.coverUrl} alt="" draggable={false} /><span className="format-badge">{book.format || "TXT"}</span><span className="resume-pill"><Play weight="fill" /> 继续</span></div>
               <strong>{book.title}</strong><small>{book.currentChapterTitle || book.author || "尚未开始阅读"}</small><div className="book-progress"><span style={{ width: `${book.progressPercent}%` }} /></div><em>{STATUS_NAMES[book.readingStatus] || (book.progressPercent >= 100 ? "已读" : book.progressPercent > 0 ? "阅读中" : "未读")} · {book.progressPercent}%</em>
             </button>
+            {selectionMode ? <label className="book-selection" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`选择书籍 ${book.title}`} checked={selectedIds.includes(book.id)} onChange={() => setSelectedIds((ids) => toggleLibrarySelection(ids, book.id))} /></label> : null}
             <button className="book-more" aria-label={`${book.title}的更多操作`} title="更多操作" onClick={(event) => showBookMenu(event, book)}><DotsThreeVertical weight="bold" /></button>
           </div>
         ))}
@@ -839,7 +848,7 @@ function FloatingProgress({ percent, enabled, disabled, sessionId, onSeek, onInt
   );
 }
 
-function NativeFloatingReader({ state, loading, error, networkNotice, pointerInside, resizing, onPointerInsideChange, pendingCommand, pendingSetting, onCommand, onSeek, onSettings, onClose, onReturnToMain, onMove, onResize }) {
+function NativeFloatingReader({ state, loading, error, networkNotice, pointerInside, resizing, onPointerInsideChange, pendingCommand, pendingSetting, onCommand, onSeek, onSettings, onClose, onReturnToMain, onMove, onResize, features }) {
   const { settings, playback, context } = state;
   const playing = playback.status === "playing";
   const canControlPlayback = Boolean(state.sessionId) && !pendingCommand;
@@ -1005,6 +1014,7 @@ function NativeFloatingReader({ state, loading, error, networkNotice, pointerIns
           <button className="floating-play" aria-label={playing ? "暂停" : "播放"} disabled={!canControlPlayback} onClick={() => onCommand(playing ? "pause" : "play")}>{playing ? <Pause weight="fill" /> : <Play weight="fill" />}</button>
           <IconButton label="下一句" onClick={canControlPlayback ? () => onCommand("nextSentence") : undefined}><CaretRight weight="fill" /></IconButton>
         </div>
+        <SleepTimerControl timer={playback.sleepTimer} features={features} />
         <label className="floating-opacity-control">
           <span>背景 {Math.round(visibleOpacity * 100)}%</span>
           <input aria-label="悬浮窗背景透明度" type="range" min="0" max="100" step="5" value={Math.round(visibleOpacity * 100)} disabled={settingPending("backgroundOpacity")} onChange={(event) => changeBackgroundOpacity(event.target.value)} />
@@ -1167,6 +1177,7 @@ function FloatingApplication() {
     <div className="floating-surface-stage">
       <ActivityReporter features={connectionRef.current?.features} surface="floating" sessionId={state.sessionId} visible={state.visible} />
       <NativeFloatingReader
+        features={connectionRef.current?.features}
         state={state}
         pointerInside={pointerInside}
         resizing={resizing}
@@ -1368,18 +1379,18 @@ const ChapterDirectory = memo(function ChapterDirectory({ chapters, selectedInde
   }}><div className="toc-spacer" style={{ height: chapters.length * rowHeight }}><div className="toc-visible" style={{ transform: `translateY(${first * rowHeight}px)` }}>{chapters.slice(first, last).map((chapter) => <button key={chapter.index} data-chapter-index={chapter.index} role="option" aria-selected={selectedIndex === chapter.index} aria-posinset={chapter.index + 1} aria-setsize={chapters.length} title={chapter.title} className={selectedIndex === chapter.index ? "selected" : ""} onClick={() => onNavigate({ kind: "position", chapterIndex: chapter.index, charOffset: 0 })}><span>{String(chapter.index + 1).padStart(2, "0")}</span><span className="chapter-title">{chapter.title}</span></button>)}</div></div></div>;
 });
 
-function NativeReaderToolbar({ data, panelMode, setPanelMode, onBack, onSettings, floatingAvailable, floatingVisible, onFloatingToggle, onOpenSettings }) {
+function NativeReaderToolbar({ data, panelMode, setPanelMode, onBack, onSettings, floatingAvailable, floatingVisible, onFloatingToggle, onOpenSettings, onPrepareOffline }) {
   const { settings } = data;
   return (
     <div className="reader-toolbar">
       <div className="toolbar-group"><IconButton label="返回内容库" onClick={onBack}><ArrowLeft /></IconButton><IconButton label="目录" active={panelMode === "toc"} onClick={() => setPanelMode("toc")}><SidebarSimple /></IconButton><span className="toolbar-title">{data.book.title}</span></div>
       <div className="toolbar-group toolbar-center"><IconButton label="缩小字号" onClick={() => onSettings({ fontSize: Math.max(12, settings.fontSize - 1) })}><Minus /></IconButton><span className="font-value">{settings.fontSize}</span><IconButton label="放大字号" onClick={() => onSettings({ fontSize: Math.min(40, settings.fontSize + 1) })}><Plus /></IconButton><button className="speed" onClick={() => onSettings({ paragraphMode: settings.paragraphMode % 3 + 1 })}><TextAa /> 排版 {settings.paragraphMode}</button></div>
-      <div className="toolbar-group"><IconButton label="书内搜索" active={panelMode === "search"} onClick={() => setPanelMode("search")}><MagnifyingGlass /></IconButton><IconButton label="书签" active={panelMode === "bookmarks"} onClick={() => setPanelMode("bookmarks")}><PushPin /></IconButton>{floatingAvailable ? <IconButton label="切换到悬浮朗读" active={floatingVisible} onClick={onFloatingToggle}><CornersOut /></IconButton> : null}<IconButton label="更多设置" onClick={onOpenSettings}><GearSix /></IconButton></div>
+      <div className="toolbar-group"><IconButton label="书内搜索" active={panelMode === "search"} onClick={() => setPanelMode("search")}><MagnifyingGlass /></IconButton><IconButton label="书签" active={panelMode === "bookmarks"} onClick={() => setPanelMode("bookmarks")}><PushPin /></IconButton>{floatingAvailable ? <IconButton label="切换到悬浮朗读" active={floatingVisible} onClick={onFloatingToggle}><CornersOut /></IconButton> : null}<IconButton label="准备离线听书" onClick={onPrepareOffline}><Headphones /></IconButton><IconButton label="更多设置" onClick={onOpenSettings}><GearSix /></IconButton></div>
     </div>
   );
 }
 
-function NativePlayer({ playback, chapterTitle, pendingCommand, selectedStart, onCommand, onNavigate, onSettings, onLocate, settings, networkNotice }) {
+function NativePlayer({ playback, chapterTitle, pendingCommand, selectedStart, onCommand, onNavigate, onSettings, onLocate, settings, networkNotice, features }) {
   const [seekPercent, setSeekPercent] = useState(playback.position.progressPercent);
   const seekingRef = useRef(false);
   useEffect(() => {
@@ -1393,12 +1404,13 @@ function NativePlayer({ playback, chapterTitle, pendingCommand, selectedStart, o
       <div className="player-copy"><strong>{chapterTitle}</strong>{effectiveNetworkNotice ? <NetworkStatusHint notice={effectiveNetworkNotice} /> : <small>{selectedStart && !playing ? "已选择朗读起点，点击播放即可从这里开始" : playback.sentence ? `正在朗读：${playback.sentence.text}` : playback.status === "paused" ? "朗读已暂停" : "阅读进度已同步"}</small>}</div>
       <div className="player-controls"><IconButton label="上一句" onClick={disabled ? undefined : () => onCommand("previousSentence")}><CaretLeft weight="bold" /></IconButton><button className="play-button" aria-label={playing ? "暂停" : "播放"} disabled={disabled} onClick={() => onCommand(playing ? "pause" : "play")}>{playing ? <Pause weight="fill" /> : <Play weight="fill" />}</button><IconButton label="下一句" onClick={disabled ? undefined : () => onCommand("nextSentence")}><CaretRight weight="bold" /></IconButton></div>
       <div className="player-slider"><span>{seekPercent.toFixed(1)}%</span><input type="range" min="0" max="100" step="0.1" value={seekPercent} onPointerDown={() => { seekingRef.current = true; }} onChange={(event) => setSeekPercent(Number(event.target.value))} onPointerUp={(event) => { seekingRef.current = false; onNavigate({ kind: "percent", percent: Number(event.currentTarget.value) }); }} /><span>100%</span></div>
-      <div className="player-tools"><button className="speed" onClick={() => onSettings({ ttsRate: settings.ttsRate >= 300 ? 120 : settings.ttsRate + 20 })}>{settings.ttsRate}</button><IconButton label={`音量 ${settings.volume}`} onClick={() => onSettings({ volume: settings.volume >= 100 ? 50 : Math.min(100, settings.volume + 10) })}><SpeakerHigh /></IconButton><IconButton label="定位当前朗读" disabled={!playback.sentence} onClick={onLocate}><Crosshair /></IconButton><IconButton label="停止朗读" onClick={disabled ? undefined : () => onCommand("stop")}><X /></IconButton></div>
+      <div className="player-tools"><SleepTimerControl timer={playback.sleepTimer} features={features} /><button className="speed" onClick={() => onSettings({ ttsRate: settings.ttsRate >= 300 ? 120 : settings.ttsRate + 20 })}>{settings.ttsRate}</button><IconButton label={`音量 ${settings.volume}`} onClick={() => onSettings({ volume: settings.volume >= 100 ? 50 : Math.min(100, settings.volume + 10) })}><SpeakerHigh /></IconButton><IconButton label="定位当前朗读" disabled={!playback.sentence} onClick={onLocate}><Crosshair /></IconButton><IconButton label="停止朗读" onClick={disabled ? undefined : () => onCommand("stop")}><X /></IconButton></div>
     </div>
   );
 }
 
-export function NativeReader({ state, networkNotice, selectedStart, onChooseStart, onBack, onNavigate, onGetWindow, onUpdatePosition, onSearch, onLoadBookmarks, onAddBookmark, onRemoveBookmark, onBookmarkSaved, onCommand, onSettings, floatingAvailable, floatingVisible, onFloatingToggle, onOpenSettings, features }) {
+export function NativeReader({ state, networkNotice, selectedStart, onChooseStart, onBack, onNavigate, onGetWindow, onUpdatePosition, onSearch, onLoadBookmarks, onAddBookmark, onRemoveBookmark, onBookmarkSaved, onCommand, onSettings, floatingAvailable, floatingVisible, onFloatingToggle, onOpenSettings, features, voiceOptions = [] }) {
+  const [cacheOpen, setCacheOpen] = useState(false);
   const [selection, setSelection] = useState(null);
   const [editingNote, setEditingNote] = useState(null);
   const [noteActionError, setNoteActionError] = useState("");
@@ -1533,7 +1545,7 @@ export function NativeReader({ state, networkNotice, selectedStart, onChooseStar
 
   return (
     <section className="reader-page native-reader">
-      <NativeReaderToolbar data={data} panelMode={panelMode} setPanelMode={changePanel} onBack={onBack} onSettings={onSettings} floatingAvailable={floatingAvailable} floatingVisible={floatingVisible} onFloatingToggle={onFloatingToggle} onOpenSettings={onOpenSettings} />
+      <NativeReaderToolbar onPrepareOffline={() => setCacheOpen(true)} data={data} panelMode={panelMode} setPanelMode={changePanel} onBack={onBack} onSettings={onSettings} floatingAvailable={floatingAvailable} floatingVisible={floatingVisible} onFloatingToggle={onFloatingToggle} onOpenSettings={onOpenSettings} />
       <div className="reader-layout">
         <aside className="toc-panel">
           <div className="toc-title"><span>{panelMode === "toc" ? "目录" : panelMode === "search" ? "书内搜索" : "书签与笔记"}</span><small>{panelMode === "toc" ? `${data.book.chapters.length} 章` : ""}</small></div>
@@ -1551,7 +1563,8 @@ export function NativeReader({ state, networkNotice, selectedStart, onChooseStar
           <div className="page-count">{data.position.progressPercent.toFixed(1)}%</div>
         </article>
       </div>
-      <NativePlayer playback={playback} chapterTitle={chapterTitle} pendingCommand={state.pendingCommand} selectedStart={selectedStart} onCommand={onCommand} onNavigate={navigate} onSettings={onSettings} onLocate={locateCurrentSentence} settings={data.settings} networkNotice={networkNotice} />
+      {cacheOpen ? <OfflineCachePanel features={features} book={data.book} currentChapterIndex={playback.position.chapterIndex} voices={voiceOptions} requestedVoiceId={data.settings.ttsVoiceId} rate={data.settings.ttsRate} onClose={() => setCacheOpen(false)} onOpenModels={() => { setCacheOpen(false); onOpenSettings("voices"); }} /> : null}
+      <NativePlayer features={features} playback={playback} chapterTitle={chapterTitle} pendingCommand={state.pendingCommand} selectedStart={selectedStart} onCommand={onCommand} onNavigate={navigate} onSettings={onSettings} onLocate={locateCurrentSentence} settings={data.settings} networkNotice={networkNotice} />
       {selection ? <AnnotationPopover key={`${data.sessionId}:${selection.selectionToken}`} selection={selection} sheetRef={readingSheetRef} onSave={saveNote} onRemove={removeNote} onClose={closeSelection} onInteractionLockChange={lockAnnotation} onRead={(target) => { onChooseStart({ kind: "position", chapterIndex: target.chapterIndex, charOffset: target.startOffset }); window.getSelection()?.removeAllRanges(); closeSelection(); onCommand("play"); }} /> : null}
       {noteFeedback ? <div className="annotation-feedback" role="status">{noteFeedback}</div> : null}
       {noteActionError ? <p className="reader-side-error" role="alert">{noteActionError}</p> : null}
@@ -1610,8 +1623,8 @@ function formatUpdateTime(value) {
   }).format(date);
 }
 
-function SettingsModal({ preferences, speech, floatingSettings, version, softwareUpdate, pending, onUpdateApp, onUpdateSpeech, onUpdateFloating, onCheckUpdate, onDownloadUpdate, onSkipUpdate, onInstallUpdate, onOpenUpdatePage, onClose, features }) {
-  const [activeTab, setActiveTab] = useState("reading");
+function SettingsModal({ preferences, speech, floatingSettings, version, softwareUpdate, pending, onUpdateApp, onUpdateSpeech, onUpdateFloating, onCheckUpdate, onDownloadUpdate, onSkipUpdate, onInstallUpdate, onOpenUpdatePage, onClose, features, initialTab = "reading", readerData }) {
+  const [activeTab, setActiveTab] = useState(initialTab);
   const themes = ["白天", "护眼", "米黄", "夜间"];
   const edgeVoices = speech.voices.filter((voice) => voice.backend === "edge");
   const localVoices = speech.voices.filter((voice) => voice.backend === "sapi");
@@ -1621,6 +1634,9 @@ function SettingsModal({ preferences, speech, floatingSettings, version, softwar
   const pickerColor = floatingPickerColor(floatingSettings);
   const tabs = [
     ["reading", "朗读与悬浮"],
+    ["voices", "音色与模型"],
+    ["offline", "离线听书"],
+    ["data", "备份与恢复"],
     ["general", "常规"],
     ["updates", "更新与关于"],
   ];
@@ -1653,7 +1669,6 @@ function SettingsModal({ preferences, speech, floatingSettings, version, softwar
               <SettingsRange label="句间停顿" min={0} max={1} step={0.05} value={speech.settings.sentenceGapSeconds} disabled={isPending("speech", "sentenceGapSeconds")} formatValue={(value) => `${Number(value).toFixed(2)} 秒`} onCommit={(sentenceGapSeconds) => onUpdateSpeech({ sentenceGapSeconds })} />
               <p className="settings-hint inline">切换音色或语速时，正在朗读的当前句会使用新设置重新开始，文字与声音保持一致。</p>
             </section>
-            <KokoroPanel features={features} voices={kokoroVoices} selectedVoice={speech.settings.ttsVoiceId} onSelect={onUpdateSpeech} />
             <section className="settings-section floating-settings-section"><h3>悬浮朗读</h3>
               <div className="settings-field"><span>悬浮窗背景</span><div className="theme-options compact">{[["light", "浅色"], ["sepia", "米黄"], ["dark", "深色"]].map(([value, label]) => <button key={value} className={floatingSettings.background === value ? "selected" : ""} disabled={isPending("floating", "background")} onClick={() => onUpdateFloating({ background: value })}>{label}</button>)}</div></div>
               <label className="confirmation-row"><input type="checkbox" checked={floatingSettings.hoverDisplayEnabled} disabled={isPending("floating", "hoverDisplayEnabled")} onChange={(event) => onUpdateFloating({ hoverDisplayEnabled: event.target.checked })} />鼠标移开时显示上一段和下一段</label>
@@ -1662,6 +1677,9 @@ function SettingsModal({ preferences, speech, floatingSettings, version, softwar
               <div className="settings-field color-setting"><span>朗读字体颜色</span><div><input aria-label="悬浮窗朗读字体颜色" title="选择颜色后立即切换为自定义配色" type="color" value={pickerColor} onChange={(event) => { const patch = floatingTextColorPatch(event.target.value); if (patch) onUpdateFloating(patch); }} /><button className={!customTextColor ? "selected" : ""} onClick={() => onUpdateFloating({ textColor: "auto" })}>自动配色</button><span className="color-setting-value">{customTextColor ? floatingSettings.textColor : "选择颜色即使用"}</span></div></div>
             </section>
           </> : null}
+          {activeTab === "voices" ? <><VoiceCenter features={features} selectedVoice={speech.settings.ttsVoiceId} onSelect={onUpdateSpeech} /><KokoroPanel features={features} voices={kokoroVoices} selectedVoice={speech.settings.ttsVoiceId} onSelect={onUpdateSpeech} showVoices={false} /></> : null}
+          {activeTab === "offline" ? <OfflineCachePanel features={features} book={readerData?.book} currentChapterIndex={readerData?.playback.position.chapterIndex || 0} voices={speech.voices} requestedVoiceId={speech.settings.ttsVoiceId} rate={speech.settings.ttsRate} onOpenModels={() => setActiveTab("voices")} /> : null}
+          {activeTab === "data" ? <BackupPanel features={features} /> : null}
           {activeTab === "updates" ? <>
             <section className="settings-section software-update-section"><h3>软件更新</h3>
               <div className="update-detail-row"><span>当前版本</span><strong>v{version || softwareUpdate.currentVersion}</strong></div>
@@ -1737,6 +1755,7 @@ function MainApplication() {
   const [softwareUpdate, setSoftwareUpdate] = useState(DEFAULT_SOFTWARE_UPDATE);
   const [updatePromptVersion, setUpdatePromptVersion] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState("reading");
   const [networkNotice, handlePlaybackEvent] = usePlaybackNetworkNotice(qaNetwork ? NETWORK_FALLBACK_NOTICE : null);
   const settingsPendingRef = useRef(new Set());
   const [settingsPending, setSettingsPending] = useState([]);
@@ -1877,6 +1896,20 @@ function MainApplication() {
         } catch (error) {
           if (active) setBridgeError(error.message || "导入完成，但内容库刷新失败。");
         }
+      });
+      connected.onFeaturesChanged?.(async (event) => {
+        if (!active || event.kind !== "restore") return;
+        readerSessionRef.current = "";
+        readerDataRef.current = null;
+        readerStartTargetRef.current = null;
+        setSelectedReaderStart(null);
+        dispatchReader({ type: "RESET" });
+        setPage("library");
+        if (event.data.error) setBridgeError(event.data.error.message);
+        try {
+          const response = await connected.library.getState();
+          if (active) { setBooks(response.data.books); setLibrarySortMode(response.data.sortMode); }
+        } catch (caught) { if (active) setBridgeError(caught.message); }
       });
       connected.onReaderOpened((event) => {
         if (!active || event.requestId !== readerOpenRequestRef.current) return;
@@ -2532,7 +2565,7 @@ function MainApplication() {
             {page === "statistics" ? <StatisticsView features={connectionRef.current?.features} /> : page === "reader" && bridgeMode === "demo"
               ? <DemoReader setPage={setPage} fontSize={fontSize} setFontSize={setFontSize} playing={playing} setPlaying={setPlaying} floating={floating} setFloating={setFloating} networkNotice={networkNotice} />
               : page === "reader" && bridgeMode === "native"
-                ? <NativeReader features={connectionRef.current?.features} state={readerState} networkNotice={networkNotice} selectedStart={selectedReaderStart} onChooseStart={chooseReaderStart} onBack={() => setPage("library")} onNavigate={navigateReader} onGetWindow={getReaderWindow} onUpdatePosition={updateReaderPosition} onSearch={searchReader} onLoadBookmarks={loadReaderBookmarks} onAddBookmark={addReaderBookmark} onRemoveBookmark={removeReaderBookmark} onBookmarkSaved={(bookmark) => dispatchReader({ type: "BOOKMARK_SAVED", bookmark })} onCommand={controlReaderPlayback} onSettings={updateReaderSettings} floatingAvailable={capabilities.floatingReader} floatingVisible={Boolean(nativeFloatingState?.visible)} onFloatingToggle={switchToFloatingReader} onOpenSettings={() => setSettingsOpen(true)} />
+                ? <NativeReader voiceOptions={speechState.voices} features={connectionRef.current?.features} state={readerState} networkNotice={networkNotice} selectedStart={selectedReaderStart} onChooseStart={chooseReaderStart} onBack={() => setPage("library")} onNavigate={navigateReader} onGetWindow={getReaderWindow} onUpdatePosition={updateReaderPosition} onSearch={searchReader} onLoadBookmarks={loadReaderBookmarks} onAddBookmark={addReaderBookmark} onRemoveBookmark={removeReaderBookmark} onBookmarkSaved={(bookmark) => dispatchReader({ type: "BOOKMARK_SAVED", bookmark })} onCommand={controlReaderPlayback} onSettings={updateReaderSettings} floatingAvailable={capabilities.floatingReader} floatingVisible={Boolean(nativeFloatingState?.visible)} onFloatingToggle={switchToFloatingReader} onOpenSettings={(tab = "reading") => { setSettingsInitialTab(tab); setSettingsOpen(true); }} />
                 : <Library features={connectionRef.current?.features} onReload={() => reloadLibraryFeatures().catch((e) => setBridgeError(e.message))} {...libraryActions} books={books} sortMode={librarySortMode} error={bridgeError} loading={libraryLoading} capabilities={effectiveCapabilities} readerEnabled={readerEnabled} importState={importState} openAfterImportBookId={openAfterImportBookId} />}
           </main>
         </div>
@@ -2541,7 +2574,7 @@ function MainApplication() {
       {pasteOpen && <PasteModal onClose={() => setPasteOpen(false)} onImport={startPasteImport} demoMode={bridgeMode === "demo"} />}
       {webOpen && <WebImportModal onClose={() => setWebOpen(false)} onImport={startWebImport} />}
       {importSelection && <ImportConfirmationModal selection={importSelection} onClose={() => { setImportSelection(null); setImportState({ ...EMPTY_IMPORT_STATE }); }} onStart={startFileImport} />}
-      {settingsOpen && <SettingsModal features={connectionRef.current?.features} preferences={appPreferences} speech={speechState} floatingSettings={nativeFloatingState?.settings || EMPTY_FLOATING_STATE.settings} version={appVersion} softwareUpdate={softwareUpdate} pending={settingsPending} onUpdateApp={updateAppPreferences} onUpdateSpeech={updateSpeechPreferences} onUpdateFloating={updateFloatingPreferences} onCheckUpdate={checkForUpdates} onDownloadUpdate={downloadUpdate} onSkipUpdate={skipUpdate} onInstallUpdate={installUpdate} onOpenUpdatePage={openUpdatePage} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsModal initialTab={settingsInitialTab} readerData={readerState.phase === "ready" ? readerState.data : null} features={connectionRef.current?.features} preferences={appPreferences} speech={speechState} floatingSettings={nativeFloatingState?.settings || EMPTY_FLOATING_STATE.settings} version={appVersion} softwareUpdate={softwareUpdate} pending={settingsPending} onUpdateApp={updateAppPreferences} onUpdateSpeech={updateSpeechPreferences} onUpdateFloating={updateFloatingPreferences} onCheckUpdate={checkForUpdates} onDownloadUpdate={downloadUpdate} onSkipUpdate={skipUpdate} onInstallUpdate={installUpdate} onOpenUpdatePage={openUpdatePage} onClose={() => setSettingsOpen(false)} />}
       {updatePromptVersion && softwareUpdate.latestVersion === updatePromptVersion ? <UpdateAvailableModal update={softwareUpdate} onDownload={downloadUpdate} onSkip={skipUpdate} onOpenRelease={() => openUpdatePage("release")} onClose={dismissUpdatePrompt} /> : null}
     </div>
   );

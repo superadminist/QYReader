@@ -649,6 +649,11 @@ class DesktopWindow(_WindowRenderLifecycle, QMainWindow):
         window.deleteLater()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        prepare = getattr(getattr(self, "bridge", None), "prepare_shutdown", None)
+        if callable(prepare) and not prepare():
+            event.ignore()
+            QTimer.singleShot(250, self.close)
+            return
         self._cancel_window_interaction()
         self._exit_requested = True
         if self._tray is not None:

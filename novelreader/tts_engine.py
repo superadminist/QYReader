@@ -1091,6 +1091,7 @@ class SpeechController:
         self._book = None
         self._ci = 0
         self._off = 0
+        self.sleep_timer = None
         self._gen = 0  # 会话代号：每次 start 自增
         self._resume_counter = 0
         self._queue = queue.Queue()
@@ -1341,7 +1342,7 @@ class SpeechController:
             self._edge_prime_event = ready
             self._edge_prime_prefetch = self._new_edge_prefetch(content, next_clean, ci, book=book, autostart=False)
             prime_prefetch = self._edge_prime_prefetch
-        cached = self._memory_edge_audio(key) or self._cached_audio(ci, original_offset)
+        cached = self._memory_edge_audio(key) or self._cached_audio(ci, original_offset, text=text)
         if cached:
             self._remember_edge_audio(key, cached)
             with self._cv:
@@ -1455,7 +1456,7 @@ class SpeechController:
         with self._book_cachers_lock:
             return self._book_cachers.get(bid)
 
-    def _cached_audio(self, ci, off, *, voice=None, rate=None, book_id=None):
+    def _cached_audio(self, ci, off, *, voice=None, rate=None, book_id=None, text=None):
         """按 (章节, 句偏移, 语音, 语速, 书籍) 查找整本缓存中的 MP3；未命中返回 None。"""
         if not self._tts_cache_dir:
             return None
@@ -1468,7 +1469,15 @@ class SpeechController:
         try:
             if os.path.exists(p) and os.path.getsize(p) > 0:
                 with open(p, "rb") as f:
-                    return f.read()
+                    audio = f.read()
+                metadata = p + ".meta.json"
+                if os.path.isfile(metadata):
+                    import hashlib
+                    with open(metadata, "r", encoding="utf-8") as source:
+                        expected = json.load(source)
+                    if text is None or expected.get("textSha256") != hashlib.sha256(text.encode("utf-8")).hexdigest() or expected.get("audioSha256") != hashlib.sha256(audio).hexdigest():
+                        return None
+                return audio
         except Exception:
             pass
         return None
@@ -1485,7 +1494,6 @@ class SpeechController:
         if not self._tts_cache_dir or not book or not book.chapters:
             return {"state": "unavailable"}
         bid = str(book_id or "book")
-        self._book_id = bid  # 同步当前书 id，保证后续查询/控制落在本书
         with self._cv:
             voice = self._edge_voice
             rate = int(self._rate)
@@ -2129,6 +2137,11 @@ class SpeechController:
 
     def _should_stop(self, gen):
         with self._cv:
+            timer = self.sleep_timer
+            if self._gen == gen and timer is not None and timer.expired():
+                self._book = None
+                self._state = "idle"
+                self._cv.notify_all()
             return (
                 self._closed
                 or self._state == "idle"
@@ -2173,6 +2186,15 @@ class SpeechController:
                     orig_to_clean(cmap, off) if off < len(orig_content) else len(clean_text)
                 )
                 if clean_off >= len(clean_text):
+                    with self._cv:
+                        timer = self.sleep_timer
+                        timer_version = timer.chapter_version(book, ci) if timer is not None else None
+                        if self._gen == gen and timer_version is not None:
+                            self._book = None
+                            self._state = "idle"
+                            self._post({"type": "sleep_stopped", "chapter_idx": ci, "char_offset": len(orig_content), "timerVersion": timer_version}, gen)
+                            self._cv.notify_all()
+                            return
                     ci += 1
                     off = 0
                     self._post({"type": "chapter", "chapter_idx": ci}, gen)
@@ -2386,6 +2408,8 @@ class SpeechController:
             started_token = self._engine.connect("started-word", _on_audio_started)
             finished_token = self._engine.connect("finished-utterance", _on_finished)
             error_token = self._engine.connect("error", _on_error)
+            if self._should_stop(gen):
+                return False
             self._engine.say(text, name=utterance_name)
             while not done.is_set():
                 if self._should_stop(gen):
@@ -2476,7 +2500,7 @@ class SpeechController:
             if not audio and chapter is not None:
                 orig_off = clean_to_orig(cmap, off, len(chapter.content))
                 audio = self._memory_edge_audio((bid, voice, rate, ci, orig_off, text))
-                audio = audio or self._cached_audio(ci, orig_off, voice=voice, rate=rate, book_id=bid)
+                audio = audio or self._cached_audio(ci, orig_off, voice=voice, rate=rate, book_id=bid, text=text)
             return audio
 
         def single(text):
@@ -2757,7 +2781,7 @@ class SpeechController:
         if not primed:
             audio = (self._memory_edge_audio(cache_key)
                      or self._memory_edge_audio(("synthesis", self._edge_voice, int(self._rate), text))
-                     or self._cached_audio(ci, off))
+                     or self._cached_audio(ci, off, text=text))
         if audio:
             self._remember_edge_audio(cache_key, audio)
             if self._edge_prefetch is None:
@@ -2859,7 +2883,12 @@ class SpeechController:
             with self._cv:
                 if self._should_stop(gen):
                     return False
-                service.request(following, voice, rate, priority=10)
+                try:
+                    service.request(following, voice, rate, priority=10)
+                except Exception:
+                    # Optional lookahead must not reject an already cached
+                    # current sentence when the model is absent after restore.
+                    break
             offset = end
         started = time.monotonic()
         buffering = False
@@ -2881,7 +2910,7 @@ class SpeechController:
 
     def _speak_edge_play(self, audio, gen, start_event=None, backend="edge"):
         """用 Windows MCI（winmm.dll）播放预生成的 MP3，支持暂停/停止（零第三方依赖）。"""
-        if not audio:
+        if not audio or self._should_stop(gen):
             return False
         self._active_sentence_backend = backend
         tmp_path = None
@@ -2896,10 +2925,9 @@ class SpeechController:
             _set_process_volume(self._volume)  # Core Audio 进程音量（主要）
             segment = audio if isinstance(audio, _EdgeSentenceAudio) else None
             with self._cv:
-                if backend == "kokoro":
-                    self._cv.wait_for(lambda: self._state != "paused" or self._gen != gen or self._book is None)
-                    if self._state == "idle" or self._gen != gen or self._book is None:
-                        return False
+                self._cv.wait_for(lambda: self._state != "paused" or self._should_stop(gen))
+                if self._should_stop(gen):
+                    return False
                 if segment is not None:
                     _mci_play_range(segment.start_ms, segment.end_ms)
                 else:
@@ -2909,14 +2937,14 @@ class SpeechController:
                     self._post(dict(start_event), gen)
             while _mci_playing():
                 with self._cv:
-                    if self._state == "idle" or self._book is None or self._gen != gen:
+                    if self._should_stop(gen):
                         _mci_stop()
                         break
                     if self._state == "paused":
                         _mci_pause()
                         self._post({"type": "audio_end"}, gen)
                         self._cv.wait()
-                        if self._state == "idle" or self._book is None or self._gen != gen:
+                        if self._should_stop(gen):
                             _mci_stop()
                             break
                         if segment is not None:

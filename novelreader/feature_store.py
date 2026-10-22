@@ -94,10 +94,14 @@ class OrganizationService:
         return taxonomy(read_library(self.path))
 
     def update(self, request):
+        if not isinstance(request, dict):
+            raise FeatureError("INVALID_REQUEST", "书架操作参数无效。")
         with library_write_lock(self.path):
             data = read_library(self.path)
             action = request.get("action")
-            if action == "book":
+            if action == "batch":
+                self._apply_batch(data, request)
+            elif action == "book":
                 book = data["books"].get(request.get("bookId"))
                 if not isinstance(book, dict):
                     raise FeatureError("BOOK_NOT_FOUND", "内容已不在书架中。")
@@ -152,6 +156,64 @@ class OrganizationService:
                 raise FeatureError("INVALID_REQUEST", "书架操作无效。")
             save_library(self.path, data)
         return self.state()
+
+    @staticmethod
+    def _apply_batch(data, request):
+        """Validate every target before changing any metadata in this snapshot."""
+        identifiers = request.get("bookIds")
+        if (not isinstance(identifiers, list) or not identifiers
+                or any(not isinstance(identifier, str) or not identifier for identifier in identifiers)
+                or len(set(identifiers)) != len(identifiers)):
+            raise FeatureError("INVALID_REQUEST", "请选择有效内容，书籍编号不能重复。")
+        books = [data["books"].get(identifier) for identifier in identifiers]
+        if any(not isinstance(book, dict) for book in books):
+            raise FeatureError("BOOK_NOT_FOUND", "选中内容已不在书架中，本次批量修改未保存。")
+        patch = request.get("patch")
+        allowed = {"categoryId", "addTagIds", "removeTagIds", "readingStatus", "statusMode"}
+        if not isinstance(patch, dict) or not patch or set(patch) - allowed:
+            raise FeatureError("INVALID_REQUEST", "批量修改参数无效。")
+        terms = taxonomy(data)
+        categories = {""} | {term["id"] for term in terms["categories"]}
+        tags = {term["id"] for term in terms["tags"]}
+        if "categoryId" in patch and (not isinstance(patch["categoryId"], str) or patch["categoryId"] not in categories):
+            raise FeatureError("INVALID_REQUEST", "分类不存在。")
+        for key in ("addTagIds", "removeTagIds"):
+            if key in patch:
+                values = patch[key]
+                if (not isinstance(values, list) or any(not isinstance(value, str) or value not in tags for value in values)
+                        or len(set(values)) != len(values)):
+                    raise FeatureError("INVALID_REQUEST", "标签不存在或重复。")
+        additions, removals = patch.get("addTagIds", []), patch.get("removeTagIds", [])
+        if set(additions) & set(removals):
+            raise FeatureError("INVALID_REQUEST", "同一标签不能同时添加和移除。")
+        for key, values in (("readingStatus", {"unread", "reading", "read"}), ("statusMode", {"auto", "manual"})):
+            if key in patch and (not isinstance(patch[key], str) or patch[key] not in values):
+                raise FeatureError("INVALID_REQUEST", "阅读状态无效。")
+        if "readingStatus" in patch and patch.get("statusMode") == "auto":
+            raise FeatureError("INVALID_REQUEST", "自动状态与人工状态不能同时设置。")
+        if not (set(patch) - {"addTagIds", "removeTagIds"}) and not additions and not removals:
+            raise FeatureError("INVALID_REQUEST", "请选择需要修改的内容。")
+        if "addTagIds" in patch or "removeTagIds" in patch:
+            for book in books:
+                old_tags = book.get("tag_ids", [])
+                if not isinstance(old_tags, list) or any(not isinstance(value, str) for value in old_tags):
+                    raise FeatureError("LIBRARY_INVALID", "选中内容的标签数据无效，本次批量修改未保存。")
+        for book in books:
+            if "categoryId" in patch:
+                book["category_id"] = patch["categoryId"]
+            if "addTagIds" in patch or "removeTagIds" in patch:
+                updated_tags = [value for value in book.get("tag_ids", []) if value not in removals]
+                updated_tags.extend(value for value in additions if value not in updated_tags)
+                book["tag_ids"] = updated_tags
+            if "readingStatus" in patch:
+                book["reading_status"] = patch["readingStatus"]
+                book["reading_status_mode"] = "manual"
+            elif patch.get("statusMode") == "manual":
+                book["reading_status"] = status_for(book)
+                book["reading_status_mode"] = "manual"
+            if patch.get("statusMode") == "auto":
+                book["reading_status_mode"] = "auto"
+                book.pop("reading_status", None)
 
     def active(self, book_id):
         with library_write_lock(self.path):
