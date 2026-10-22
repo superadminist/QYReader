@@ -30,11 +30,16 @@ These macOS-inspired UI concepts illustrate existing features; they are not scre
 
 ## Current features
 
-### v2.2.0
+### v2.2.0 · 2026-10-22
 
-- Free offline text-to-speech: download or manually import the official **Kokoro v1.0 INT8 / standard FP32** model packages in Settings. Both variants offer the same eight Chinese voices: 晓北, 晓妮, 晓晓, 晓伊, 云健, 云希, 云夏, and 云扬. Open Settings → Read Aloud & Floating Reader (朗读与悬浮) → Free Offline Voice Pack (免费离线音色包) → Model Version (模型版本). Stop playback before selecting and installing another variant. FP32 requires about 350 MB to download; INT8 requires about 132 MB. Switching preserves installed models and the selected voice. Generation speed depends on your computer. Edge and SAPI remain available through the shared `SpeechController` / `PlaybackService`. Slow generation displays a waiting state without automatically switching voices.
+- Free offline text-to-speech: download or manually import the official **Kokoro v1.0 INT8 / standard FP32** model packages in Settings. Both variants offer the same eight Chinese voices: 晓北, 晓妮, 晓晓, 晓伊, 云健, 云希, 云夏, and 云扬. Open Settings → Voices & Models (音色与模型) → Free Offline Voice Pack (免费离线音色包) → Model Version (模型版本). Stop playback before selecting and installing another variant. FP32 requires about 350 MB to download; INT8 requires about 132 MB. Switching preserves installed models and the selected voice. Generation speed depends on your computer. Edge and SAPI remain available through the shared `SpeechController` / `PlaybackService`. Slow generation displays a waiting state without automatically switching voices.
 - Offline generation scheduling: the selected model warms up in the background. Current playback and voice previews take priority over prefetching, and cached audio is immediately available. Stopping, seeking, and switching models isolate stale tasks. Incremental cache accounting and Windows long-path support reduce queueing and repeated disk scans.
 - Highlights and notes: select text to open a compact toolbar beside the selection, then click one of four color dots to highlight, choose Write Note (写笔记) for a lightweight editor, or choose Read from selection (朗读). The toolbar does not shift the text. Click an existing highlight to view its note, change its color, edit, or delete it. A successful save clears the blue text selection and shows feedback; pending saves prevent duplicate submissions. The bookmark panel retains navigation and Markdown / TXT export. Existing bookmarks are preserved. Positions use Unicode code points, so changing font size or line spacing does not change anchors.
+- Sleep timers: the main playback bar and floating controls share 15 / 30 / 60-minute presets, a custom 1–720-minute timer, and Stop at Chapter End (读完本章). Pausing does not pause the countdown. Expiry stops playback while retaining the position; chapter timers stop before the next chapter speaks and cancel when you switch books or manually leave the target chapter.
+- Offline chapters: open Prepare Offline Listening (准备离线听书) in the reader toolbar or Settings → Offline Listening (离线听书). Choose Edge or Kokoro, a voice and speed, and the current chapter, following chapters, custom chapter numbers, or the entire book. Pause, resume, verify, repair missing audio, cancel while keeping audio, or confirm cache cleanup. Playback and previews have priority over background preparation. Retained Kokoro chapters are excluded from temporary cache eviction until you clean them. Tasks require revalidation after restarting or changing content or models. SAPI remains available for live reading.
+- Voice center: Settings → Voices & Models (音色与模型) groups Edge, Kokoro, and system voices, with name / engine / ID search, favorites, cancellable or replaceable previews, and reasons for unavailable voices. Previewing does not save the reading voice, change book progress, or count as listening time. Resume the original book manually afterward.
+- Backup and restore: Settings → Backup & Restore (备份与恢复) estimates size before saving library metadata, available text and source copies, progress, notes, categories, tags, favorites, and statistics. Audio and models are optional. Restore verifies files and previews the destination, missing content, and replacement scope before confirmation. It replaces the full snapshot and retains a pre-restore backup, preserving book IDs and note anchors without changing original external files.
+- Bulk library management: click Bulk Management (批量管理) in the library, select items or all filtered results, and set or clear categories, add or remove tags, or change reading status. The UI counts selected items outside the filter. Other tags are retained, and manually set reading status can explicitly return to automatic tracking.
 - Reading statistics: the main and floating windows share local statistics, including today's time, total time, and a one-year heatmap. Reading counts while the text is visible in the foreground and there has been activity within five minutes. Listening counts actual playback, including background playback; generation, buffering, pauses, and voice previews do not count. Total time excludes overlap between reading and listening. Statistics start at zero when no historical data exists.
 - Library organization: content types (novels / articles / reference material), one category per item, multiple tags, and unread / reading / finished filters. Read Later (待读) is a built-in tag. Actual use marks an item as reading, and 100% progress marks it as finished; you can also lock its status manually. Reimporting preserves progress, bookmarks, and unknown fields.
 
@@ -54,15 +59,13 @@ The following entries are currently unavailable and do not create placeholder co
 - Podcast/audio import and speech transcription.
 - Accounts, cloud sync, and an online bookstore.
 
-Dedicated pages from the legacy Tk interface, including whole-book audio cache management, are not exposed in the 2.x React interface. Underlying data and cache formats remain compatible; the presence of backend code does not establish that a feature is available in the current UI.
-
-Sleep timers, chapter audio preparation and cache management, a unified voice center, backup and restore, and bulk library actions are covered by the [next optimization plan](docs/next-optimizations-plan.md) (Chinese). They will be implemented in a separate chat, starting with sleep timers, and are not included in v2.2.0.
+Chapter preparation and cache management are available in the 2.x interface. Existing audio cache paths remain compatible. Old audio without content verification and tasks restored after restarting are marked for verification; check and repair them before playback with the same engine, voice, and speed.
 
 ## Recent updates
 
 | Version | Main changes |
 | --- | --- |
-| [v2.2.0](release-notes/v2.2.0.md) | Moves highlights and notes into a compact toolbar beside the selection, with four color dots and direct editing of existing highlights, preserving the current interface style and data. |
+| [v2.2.0](release-notes/v2.2.0.md) | Adds sleep timers, Edge / Kokoro offline chapters, a voice center, backup and restore, and bulk library management, alongside the compact four-color annotation toolbar and shared playback state. |
 | [v2.1.9](release-notes/v2.1.9.md) | Adds the optional Kokoro FP32 model for faster offline generation; improves warm-up, scheduling, and caching while preserving INT8, all eight voices, and existing data. |
 | [v2.1.8](release-notes/v2.1.8.md) | Adds optional Kokoro offline voices, highlights and notes, reading statistics, categories, and tags using the existing interface style. |
 
@@ -99,9 +102,9 @@ Installed builds store data under the installation directory you choose in the i
 
 On the first launch of an installed build, if `<install directory>\data` does not exist, the legacy `%APPDATA%\DDNovelReader` directory is copied to the new location without deleting the original. Source runs continue using that legacy directory for compatibility. Tests can use `DOUBAO_NOVEL_DATA` to select an isolated directory.
 
-The application does not upload your library, book text, or reading progress. When you select Edge online voices, the text being read is sent to that service as part of Edge TTS synthesis. Local SAPI5 does not require network access.
+The application does not upload your library, book text, or reading progress. When you use Edge online voices for reading or preparing offline chapters, the relevant text is sent to that service as part of Edge TTS synthesis. Local SAPI5 does not require network access.
 
-Kokoro accesses official GitHub downloads only when downloading the selected model. After installation, synthesis, previews, and playback use local files. The INT8 archive is 132,303,094 bytes with SHA256 `4c3052abaa60943a341f193888cf6abd68787dae6ab8ae5c925a706caa247e4e`; the FP32 archive is 349,906,910 bytes with SHA256 `c5f7e2d2caf082bc1d20fb70334a61d99d20b484500aad32e7cf84c128ea3298`. Extracted models occupy about 181.1 / 382.7 MiB. Models are separate from the main installer and do not need to be downloaded again after upgrading. Each variant has its own model and audio cache, with a default cache limit of 500 MiB per variant. Audio currently in use is retained until it is no longer referenced. Manual imports must match the selected variant; failed validation leaves the source archive intact.
+Kokoro accesses official GitHub downloads only when downloading the selected model. After installation, synthesis, previews, and playback use local files. The INT8 archive is 132,303,094 bytes with SHA256 `4c3052abaa60943a341f193888cf6abd68787dae6ab8ae5c925a706caa247e4e`; the FP32 archive is 349,906,910 bytes with SHA256 `c5f7e2d2caf082bc1d20fb70334a61d99d20b484500aad32e7cf84c128ea3298`. Extracted models occupy about 181.1 / 382.7 MiB. Models are separate from the main installer and do not need to be downloaded again after upgrading. Each variant has its own model and audio cache, with a default temporary cache limit of 500 MiB per variant. Retained offline chapters are excluded from this eviction limit until you clean them in Offline Listening; shared or currently used files remain protected. Manual imports must match the selected variant; failed validation leaves the source archive intact.
 
 Before the new reader features first write data, the app saves `library.json.before-reader-features.bak`. Statistics are saved every five seconds and committed when playback phases change. An unexpected exit can lose the last few seconds. Existing progress is not converted into historical reading time.
 
@@ -114,8 +117,12 @@ Upgrading preserves the installation's `data` directory, and uninstalling keeps 
 3. Use the bottom playback bar to read aloud. `Ctrl+P` pauses/resumes, `Ctrl+S` stops, and `+`/`-` changes font size.
 4. Open the independent floating reader using Floating Reader (悬浮朗读) or `Ctrl+Shift+F`. Closing it does not stop playback; it remains available when the main window is minimized.
 5. Toggle fullscreen with `F11` or `Alt+Enter`.
-6. If offline generation is slow, stop playback and open Settings → Read Aloud & Floating Reader → Free Offline Voice Pack → Model Version. Select FP32 and download or import its approximately 350 MB package. You do not need to delete the existing INT8 model.
+6. If offline generation is slow, stop playback and open Settings → Voices & Models → Free Offline Voice Pack → Model Version. Select FP32 and download or import its approximately 350 MB package. You do not need to delete the existing INT8 model.
 7. Select text and click a color dot on the nearby toolbar to highlight it, or choose Write Note (写笔记) to enter and save a note. Click an existing highlight to view, recolor, edit, or delete its note.
+8. Choose Sleep Timer (睡眠定时) in the playback controls. Both windows show the same countdown; Stop at Chapter End prevents playback from continuing into the next chapter.
+9. Choose Prepare Offline Listening in the reader toolbar or manage tasks in Settings → Offline Listening. Play prepared chapters with the same engine, voice, and speed.
+10. Search, favorite, or preview voices in Settings → Voices & Models. Save or verify snapshots in Settings → Backup & Restore. Review the replacement scope before restoring; audio and models depend on what the selected backup contains.
+11. Click Bulk Management in the library and check the selected count before changing categories, tags, or reading status.
 
 ## Development
 
