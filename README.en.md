@@ -8,21 +8,21 @@ QYReader is a local novel and document reader for Windows. The 2.x desktop appli
 
 The app icon depicts open book pages leading toward morning light. Deep blue represents quiet reading, while warm gold suggests exploration. The repository includes the high-resolution PNG source and a Windows ICO with 16/32/48/64/128/256-pixel layers.
 
-## Screenshots
+## UI design showcase
 
-Content library: import files, paste text, or extract web articles, then filter by content type, category, and reading status.
+These macOS-inspired UI concepts illustrate existing features; they are not screenshots of the current release. QYReader remains a Windows application. The artwork uses Chinese interface text.
 
-![QYReader content library with import options, filters, and recently read books](assets/screenshots/library.png)
+**Keep the words you love close.** Bring files, pasted text, and web articles into a local library, organize by content type and reading status, and pick up where you left off.
 
-Reader: chapter navigation on the left, the main text area, typography settings at the top, and playback controls along the bottom.
+![QYReader library concept showing multi-format import, content filters, book covers, and reading progress](assets/screenshots/library-showcase.png)
 
-![QYReader main reading view with chapter navigation, text, font settings, and playback progress controls](assets/screenshots/reader.png)
+**Read deeply. Listen freely.** Chapter navigation and comfortable typography support focused reading. Free Kokoro offline voices, current-sentence highlighting, and a compact four-color annotation toolbar connect reading, listening, and note-taking.
 
-Floating reader: text-only view and view with playback controls visible.
+![QYReader reading concept showing chapter navigation, highlights and notes, current-sentence highlighting, and Kokoro offline playback](assets/screenshots/reader-showcase.png)
 
-| Text-only view | Playback controls visible |
-| --- | --- |
-| ![Floating reader showing the previous, current, and next sentences](assets/screenshots/floating-reader-text.png) | ![Floating reader with pinning, playback, whole-book progress, and background opacity controls](assets/screenshots/floating-reader-controls.png) |
+**Let the story stay with you.** An independent floating reader shows the surrounding sentences, supports always-on-top mode, adjustable background opacity, and playback controls, and shares reading progress with the main window.
+
+![QYReader floating reader concept showing surrounding sentences, pinning, playback controls, whole-book progress, and background opacity](assets/screenshots/floating-reader-showcase.png)
 
 ## Current features
 
