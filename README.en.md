@@ -24,6 +24,10 @@ These macOS-inspired UI concepts illustrate existing features; they are not scre
 
 ![QYReader floating reader concept showing surrounding sentences, pinning, playback controls, whole-book progress, and background opacity](assets/screenshots/floating-reader-showcase.png)
 
+**Just the words. Just the story.** In the text-only floating view, moving the pointer away hides the title bar and playback controls, leaving surrounding sentences visible and the current passage emphasized.
+
+![QYReader text-only floating reader concept with hidden title bar and controls, subdued surrounding sentences, and bold current text](assets/screenshots/floating-reader-text-showcase.png)
+
 ## Current features
 
 ### v2.2.0

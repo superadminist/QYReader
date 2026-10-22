@@ -1,8 +1,44 @@
 # README UI 展示图生成记录
 
-生成日期：2026-10-22。使用内置 Image Gen，以原有截图和品牌图标为参考生成三张配套位图。
+生成日期：2026-10-22。使用内置 Image Gen，以原有截图、用户提供的纯正文悬浮窗截图和品牌图标为参考生成四张配套位图。
 
 这些图片是 macOS 风格的 UI 概念展示，并非当前 Windows 版本的实机截图。本次只更新展示图片与中英文 README，未实现图中的界面调整。
+
+## 纯正文悬浮朗读
+
+输出：`assets/screenshots/floating-reader-text-showcase.png`
+
+参考：用户提供的纯正文悬浮窗截图、`assets/screenshots/floating-reader-showcase.png`、`assets/qyreader-icon.png`。通过内置 Image Gen 生成，保留隐藏控制栏、上下句衔接及当前段落加粗的模式特点。
+
+### 生成提示词
+
+```text
+Use case: ui-mockup / final README product showcase.
+Generate exactly ONE additional coordinated macOS-style design presentation for QYReader 启远阅读. Target dimensions 1600 x 1100 landscape. It must match the premium existing showcase series while specifically showing the PURE TEXT floating reader state from the user's supplied reference.
+
+Input references:
+Image 1 user screenshot: the authoritative layout/behavior reference. It is a rounded white floating panel displaying ONLY three text passages: small subdued previous sentence at top, large bold current sentence in the middle, small subdued next sentence at bottom. ALL CHROME IS HIDDEN. No titlebar or buttons. Match its simple 443:268 panel proportions.
+Image 2 existing QYReader showcase: style-family reference ONLY, for pearl ivory, delicate cool-blue mountains, navy typography, sunlit atmosphere and brand placement. DO NOT copy its visible player controls.
+Image 3 QYReader icon: faithful brand identity. Use original logo, not Apple branding.
+
+Create realistic, production-quality UI, very sophisticated spacing and type hierarchy. This is ONE final presentation, not a contact sheet or alternative set. Top brand lockup "QYReader 启远阅读". Main headline in beautiful large Chinese editorial type "只留文字，静静听。" Quiet subtitle below it "纯正文悬浮模式 · 上下句衔接 · 专注当前朗读". Use the same headline scale and placement as the existing series.
+
+Center ONE wide translucent ivory floating panel, about 900 wide by 540 high within the 1600 x 1100 composition. Smooth macOS-style 30px radius, extremely delicate edge and soft realistic shadow, subtle frosted appearance, no nested cards. No titlebar, no window traffic lights, no pin icon, no close icon, no fullscreen icon, no playback button, no progress bar, no opacity slider, no resize handle, no dot, no audio waveform, no labels INSIDE the panel. THE PANEL CONTAINS TEXT ONLY. The panel must have generous symmetric padding and balanced vertical spacing, exactly as the user's pure-text reference. Don't add a chapter title or app logo within the panel.
+
+Use these exact ORIGINAL synthetic passages, not the supplied screenshot's medical/educational discussion:
+Small previous sentence in medium-gray PingFang-like sans-serif, two centered lines:
+"他把书放在窗边，让第一缕阳光落在纸上。
+风翻过书页，也带来了草木清新的气息。"
+Large current passage in bold dark-charcoal PingFang-like sans-serif, center aligned, 3 generously spaced lines, the strongest element INSIDE the panel:
+"有些远方，不必急着抵达。
+沿途的一树花开，一次驻足，
+都值得慢慢收藏。"
+Small next sentence in medium-gray sans-serif, two centered lines:
+"阅读让时间有了另一种刻度。
+我们在别人的故事里，认出自己的心事。"
+
+Backdrop: understated pale-blue layered mountains, morning mist and warm ivory book-page landscape, matching previous series but less busy behind text, premium and restrained. Leave clear separation between headline and floating panel. Below panel OUTSIDE its bounds one small unobtrusive supporting caption "鼠标移开，控件隐去；文字与声音，继续陪伴。". Bottom-right small label "UI 设计展示". No feature-card row, no second window, no mouse cursor, no arrows/callout bubbles, no fake dates or metrics, no new features. Real application is Windows; only visual styling is macOS-inspired, do not claim macOS platform support. Accurate Chinese, readable fonts, no clipped text. Avoid excessive gradients, excessive shadows, frame distortions and crowded UI. This image is a conceptual README illustration, not a screenshot claim.
+```
 
 ## 本地书库
 

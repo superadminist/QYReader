@@ -24,6 +24,10 @@
 
 ![启远阅读悬浮朗读设计展示：上下句、置顶、播放控制、全文进度与背景透明度](assets/screenshots/floating-reader-showcase.png)
 
+**只留文字，静静听。** 纯正文悬浮模式下，鼠标移开后隐藏标题栏与播放控件，保留上下句，并突出当前朗读内容。
+
+![启远阅读纯正文悬浮模式设计展示：隐藏标题栏与控制栏，淡化上下句并加粗显示当前朗读内容](assets/screenshots/floating-reader-text-showcase.png)
+
 ## 当前版本能力
 
 ### v2.2.0
