@@ -10,7 +10,7 @@ The app icon depicts open book pages leading toward morning light. Deep blue rep
 
 ## UI design showcase
 
-These macOS-inspired UI concepts illustrate existing features; they are not screenshots of the current release. QYReader remains a Windows application. The artwork uses Chinese interface text.
+These macOS-inspired UI concepts put the software first, with neutral gray backgrounds, simple windows, and clear typography. They illustrate existing features and are not screenshots of the current release. QYReader remains a Windows application. The artwork uses Chinese interface text.
 
 **Keep the words you love close.** Bring files, pasted text, and web articles into a local library, organize by content type and reading status, and pick up where you left off.
 

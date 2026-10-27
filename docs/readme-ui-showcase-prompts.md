@@ -1,8 +1,52 @@
 # README UI 展示图生成记录
 
-生成日期：2026-10-22。使用内置 Image Gen，以原有截图、用户提供的纯正文悬浮窗截图和品牌图标为参考生成四张配套位图。
+## 当前版本：2026-10-27，以软件为主角
 
-这些图片是 macOS 风格的 UI 概念展示，并非当前 Windows 版本的实机截图。本次只更新展示图片与中英文 README，未实现图中的界面调整。
+根据用户“背景太花哨，不符合 macOS 风格”和“重点是要突出软件”的反馈，使用内置 Image Gen 编辑原有四张展示图，替换原路径供中英文 README 共用。
+
+这些图片是 macOS 风格的 UI 概念展示，并非当前 Windows 版本的实机截图。本次只更新展示图片、说明与生成记录，未实现图中的界面调整。
+
+### 本次统一设计约束
+
+- 外围背景采用接近 `#F3F4F6` 的浅灰白中性色，去除山景、树林、日出、雾气、河流及书页装饰；书库内部的书籍封面作为内容保留。
+- 去掉大幅宣传标题、标语和功能说明行，顶部仅保留小尺寸品牌图标、名称和当前场景名称。
+- 放大软件窗口，书库和阅读页占画面约九成宽度；悬浮窗同样以大尺寸完整呈现，确保正文和控件清楚。
+- 采用正视构图、浅色窗口、轻阴影、细分隔线和克制的蓝紫色强调；保持整组图片的字体、边距及背景风格一致。
+- 保留原有功能和示例内容，不添加账号、云同步或 macOS 平台支持等声明；纯正文悬浮窗内仅有文字，无标题栏和播放控件。
+- 请求画布为 `1600 × 1100` 横向比例，最终 PNG 使用生成器原始输出尺寸，不拉伸或裁切。
+
+### 图片与参考关系
+
+| 输出文件 | 编辑参考 | 配套风格参考 |
+| --- | --- | --- |
+| `assets/screenshots/library-showcase.png` | 原书库展示图、品牌图标 | 本次系列基准 |
+| `assets/screenshots/reader-showcase.png` | 原阅读展示图、品牌图标 | 本次新版书库图 |
+| `assets/screenshots/floating-reader-showcase.png` | 原悬浮控制窗展示图、品牌图标 | 本次新版书库图 |
+| `assets/screenshots/floating-reader-text-showcase.png` | 原纯正文展示图、品牌图标 | 本次新版悬浮控制窗图 |
+
+### 统一提示词要点
+
+```text
+Edit the referenced existing README showcase. SOFTWARE FIRST.
+Use a plain neutral #F3F4F6 background with no illustrated scenery,
+wallpaper, ornamental geometry, colored gradients or book-page decorations.
+Remove huge slogans; retain only compact top-left branding and a scene label.
+Make the complete software window the dominant subject, front-on, readable,
+with quiet macOS-inspired light surfaces, fine separators and a subtle shadow.
+Keep the existing functions, Chinese content and exact brand identity.
+For the library, keep illustrated covers only INSIDE the software.
+For the text-only floating reader, the panel must contain TEXT ONLY,
+without titlebar, icons, buttons, sliders, progress bars or resize controls.
+Match the new library showcase as the series style reference;
+match the new floating control window for the text-only variant.
+No new functionality and no macOS availability claim.
+```
+
+以下为旧版生成记录，保留供追溯；其中风景背景和大幅标题的要求已由上述当前设计约束取代。
+
+## 历史版本：2026-10-22
+
+使用内置 Image Gen，以原有截图、用户提供的纯正文悬浮窗截图和品牌图标为参考生成四张配套位图。
 
 ## 纯正文悬浮朗读
 
