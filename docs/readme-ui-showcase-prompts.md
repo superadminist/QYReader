@@ -2,7 +2,7 @@
 
 ## 当前版本：2026-10-27，以软件为主角
 
-根据用户“背景太花哨，不符合 macOS 风格”和“重点是要突出软件”的反馈，使用内置 Image Gen 编辑原有四张展示图，替换原路径供中英文 README 共用。
+根据用户“背景太花哨，不符合 macOS 风格”和“重点是要突出软件”的反馈，使用内置 Image Gen 编辑原有四张展示图，供中英文 README 共用。新版图片采用 `-minimal.png` 文件名，避免复用旧图片地址时继续显示缓存的旧版风景背景。
 
 这些图片是 macOS 风格的 UI 概念展示，并非当前 Windows 版本的实机截图。本次只更新展示图片、说明与生成记录，未实现图中的界面调整。
 
@@ -19,10 +19,10 @@
 
 | 输出文件 | 编辑参考 | 配套风格参考 |
 | --- | --- | --- |
-| `assets/screenshots/library-showcase.png` | 原书库展示图、品牌图标 | 本次系列基准 |
-| `assets/screenshots/reader-showcase.png` | 原阅读展示图、品牌图标 | 本次新版书库图 |
-| `assets/screenshots/floating-reader-showcase.png` | 原悬浮控制窗展示图、品牌图标 | 本次新版书库图 |
-| `assets/screenshots/floating-reader-text-showcase.png` | 原纯正文展示图、品牌图标 | 本次新版悬浮控制窗图 |
+| `assets/screenshots/library-showcase-minimal.png` | 原书库展示图、品牌图标 | 本次系列基准 |
+| `assets/screenshots/reader-showcase-minimal.png` | 原阅读展示图、品牌图标 | 本次新版书库图 |
+| `assets/screenshots/floating-reader-showcase-minimal.png` | 原悬浮控制窗展示图、品牌图标 | 本次新版书库图 |
+| `assets/screenshots/floating-reader-text-showcase-minimal.png` | 原纯正文展示图、品牌图标 | 本次新版悬浮控制窗图 |
 
 ### 统一提示词要点
 

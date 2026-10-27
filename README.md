@@ -14,19 +14,19 @@
 
 **把喜欢的文字，留在身边。** 多格式文件、粘贴文本和网页正文汇入本地书库，按类型与阅读状态整理，随时继续阅读。
 
-![启远阅读本地书库设计展示：多格式导入、内容筛选、书籍封面与阅读进度](assets/screenshots/library-showcase.png)
+![启远阅读本地书库设计展示：多格式导入、内容筛选、书籍封面与阅读进度](assets/screenshots/library-showcase-minimal.png)
 
 **读进去，也听进去。** 章节目录与舒适排版帮助沉浸阅读；Kokoro 免费离线朗读、当前句高亮与选区旁的四色笔记浮条，让阅读与听书自然衔接。
 
-![启远阅读沉浸阅读设计展示：章节导航、划线笔记浮条、当前朗读句高亮与 Kokoro 离线播放条](assets/screenshots/reader-showcase.png)
+![启远阅读沉浸阅读设计展示：章节导航、划线笔记浮条、当前朗读句高亮与 Kokoro 离线播放条](assets/screenshots/reader-showcase-minimal.png)
 
 **让故事，轻轻陪着你。** 独立悬浮窗显示上下句，支持置顶、背景透明度调整和播放控制，与主窗口共享阅读进度。
 
-![启远阅读悬浮朗读设计展示：上下句、置顶、播放控制、全文进度与背景透明度](assets/screenshots/floating-reader-showcase.png)
+![启远阅读悬浮朗读设计展示：上下句、置顶、播放控制、全文进度与背景透明度](assets/screenshots/floating-reader-showcase-minimal.png)
 
 **只留文字，静静听。** 纯正文悬浮模式下，鼠标移开后隐藏标题栏与播放控件，保留上下句，并突出当前朗读内容。
 
-![启远阅读纯正文悬浮模式设计展示：隐藏标题栏与控制栏，淡化上下句并加粗显示当前朗读内容](assets/screenshots/floating-reader-text-showcase.png)
+![启远阅读纯正文悬浮模式设计展示：隐藏标题栏与控制栏，淡化上下句并加粗显示当前朗读内容](assets/screenshots/floating-reader-text-showcase-minimal.png)
 
 ## 当前版本能力
 

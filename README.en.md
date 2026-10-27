@@ -14,19 +14,19 @@ These macOS-inspired UI concepts put the software first, with neutral gray backg
 
 **Keep the words you love close.** Bring files, pasted text, and web articles into a local library, organize by content type and reading status, and pick up where you left off.
 
-![QYReader library concept showing multi-format import, content filters, book covers, and reading progress](assets/screenshots/library-showcase.png)
+![QYReader library concept showing multi-format import, content filters, book covers, and reading progress](assets/screenshots/library-showcase-minimal.png)
 
 **Read deeply. Listen freely.** Chapter navigation and comfortable typography support focused reading. Free Kokoro offline voices, current-sentence highlighting, and a compact four-color annotation toolbar connect reading, listening, and note-taking.
 
-![QYReader reading concept showing chapter navigation, highlights and notes, current-sentence highlighting, and Kokoro offline playback](assets/screenshots/reader-showcase.png)
+![QYReader reading concept showing chapter navigation, highlights and notes, current-sentence highlighting, and Kokoro offline playback](assets/screenshots/reader-showcase-minimal.png)
 
 **Let the story stay with you.** An independent floating reader shows the surrounding sentences, supports always-on-top mode, adjustable background opacity, and playback controls, and shares reading progress with the main window.
 
-![QYReader floating reader concept showing surrounding sentences, pinning, playback controls, whole-book progress, and background opacity](assets/screenshots/floating-reader-showcase.png)
+![QYReader floating reader concept showing surrounding sentences, pinning, playback controls, whole-book progress, and background opacity](assets/screenshots/floating-reader-showcase-minimal.png)
 
 **Just the words. Just the story.** In the text-only floating view, moving the pointer away hides the title bar and playback controls, leaving surrounding sentences visible and the current passage emphasized.
 
-![QYReader text-only floating reader concept with hidden title bar and controls, subdued surrounding sentences, and bold current text](assets/screenshots/floating-reader-text-showcase.png)
+![QYReader text-only floating reader concept with hidden title bar and controls, subdued surrounding sentences, and bold current text](assets/screenshots/floating-reader-text-showcase-minimal.png)
 
 ## Current features
 
