@@ -9,7 +9,6 @@ import {
   ChartBar,
   CornersOut,
   Crosshair,
-  DotsThreeVertical,
   FileArrowUp,
   FolderOpen,
   GearSix,
@@ -32,9 +31,10 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { connectBridge } from "./bridge.js";
-import { ActivityReporter, BookOrganizer, KokoroPanel, NOTE_COLORS, NoteEditor, ShelfFilters, StatisticsView, STATUS_NAMES } from "./ReaderFeatures.jsx";
+import { ActivityReporter, BookOrganizer, KokoroPanel, NOTE_COLORS, NoteEditor, ShelfFilters, StatisticsView } from "./ReaderFeatures.jsx";
 import { readerSelectionFromRange } from "./readerPosition.js";
 import BatchLibraryControls, { toggleLibrarySelection } from "./BatchLibraryControls.jsx";
+import LibraryBookCard from "./LibraryBookCard.jsx";
 import BackupPanel from "./BackupPanel.jsx";
 import OfflineCachePanel from "./OfflineCachePanel.jsx";
 import VoiceCenter from "./VoiceCenter.jsx";
@@ -399,6 +399,8 @@ const Library = memo(function Library({
     && (filters.status === "all" || (book.readingStatus || (book.progressPercent >= 100 ? "read" : book.progressPercent > 0 ? "reading" : "unread")) === filters.status)
     && filters.tags.every((tag) => (book.tagIds || []).includes(tag))), [orderedBooks, normalizedQuery, filters]);
   const filtering = filters.type !== "all" || filters.category !== "all" || filters.status !== "all" || filters.tags.length > 0;
+  const filteredIds = useMemo(() => visibleBooks.map((book) => book.id), [visibleBooks]);
+  const selectedBooks = useMemo(() => new Set(selectedIds), [selectedIds]);
   const canDrag = !selectionMode && sortMode === "manual" && !normalizedQuery && !filtering && !loading && !sortPending;
   // Keep several screens mounted and advance in batches. The software Qt
   // compositor otherwise rasterizes newly mounted covers on every scroll row.
@@ -661,6 +663,18 @@ const Library = memo(function Library({
     else setBookToRemove(null);
   };
   const importing = ["selecting", "confirming", "processing", "cancelling"].includes(importState.status);
+  const cardActions = useStableActions({
+    showMenu: showBookMenu,
+    startDrag,
+    moveDrag,
+    finishDrag,
+    cancelDrag,
+    open: (book) => {
+      if (selectionMode) setSelectedIds((ids) => toggleLibrarySelection(ids, book.id));
+      else if (!suppressOpenRef.current) openBook(book);
+    },
+    toggleSelection: (bookId) => setSelectedIds((ids) => toggleLibrarySelection(ids, bookId)),
+  });
   return (
     <section ref={pageRef} className={`library-page ${draggedId ? "is-sorting" : ""}`}>
       <div className="library-heading">
@@ -686,17 +700,10 @@ const Library = memo(function Library({
       ) : null}
       <div className="section-title"><div><h2>{sortMode === "manual" ? "自定义排序" : "最近阅读"}</h2><span>{visibleBooks.length} 项内容</span></div><div className="library-sort-control" role="group" aria-label="内容库排序方式"><button className={sortMode !== "manual" ? "selected" : ""} disabled={sortPending} onClick={() => changeSortMode("recent")}>最近阅读</button><button className={sortMode === "manual" ? "selected" : ""} disabled={sortPending} onClick={() => changeSortMode("manual")}>自定义排序</button></div></div>
       {sortMode === "manual" ? <p className="library-sort-hint" role="status">{normalizedQuery || filtering ? "搜索或筛选期间暂停拖动，清空后即可调整顺序。" : sortPending ? "正在保存排序…" : "拖动卡片调整顺序，阅读不会改变排列。"}</p> : null}
-      <BatchLibraryControls selectionMode={selectionMode} onSelectionModeChange={setSelectionMode} selectedIds={selectedIds} filteredIds={visibleBooks.map((book) => book.id)} onSelectionChange={setSelectedIds} taxonomy={taxonomy} features={features} onUpdated={() => { refreshTerms(); return onReload(); }} />
+      <BatchLibraryControls selectionMode={selectionMode} onSelectionModeChange={setSelectionMode} selectedIds={selectedIds} filteredIds={filteredIds} onSelectionChange={setSelectedIds} taxonomy={taxonomy} features={features} onUpdated={() => { refreshTerms(); return onReload(); }} />
       <div ref={gridRef} className={`book-grid ${canDrag ? "sortable" : ""} ${virtualLibrary ? "virtual-library" : ""}`} style={virtualLibrary && visibleBooks.length ? { paddingTop: firstRow * gridViewport.rowHeight, paddingBottom: Math.max(0, totalRows - Math.max(firstRow + 1, endRow)) * gridViewport.rowHeight } : undefined}>
         {renderedBooks.map((book) => (
-          <div key={book.id} data-book-id={book.id} className={`book-card ${selectionMode && selectedIds.includes(book.id) ? "batch-selected" : ""} ${book.id === draggedId ? "dragging" : ""} ${book.id === openAfterImportBookId ? "just-imported" : ""}`} onContextMenu={(event) => showBookMenu(event, book)} onPointerDown={(event) => { if (!selectionMode) startDrag(event, book); }} onPointerMove={moveDrag} onPointerUp={finishDrag} onPointerCancel={cancelDrag}>
-            <button className="book-open" aria-label={`${selectionMode ? "选择" : "阅读"} ${book.title}`} aria-disabled={!selectionMode && !readerEnabled} onClick={() => { if (selectionMode) setSelectedIds((ids) => toggleLibrarySelection(ids, book.id)); else if (!suppressOpenRef.current) openBook(book); }}>
-              <div className="cover-wrap"><img src={book.coverUrl} alt="" draggable={false} /><span className="format-badge">{book.format || "TXT"}</span><span className="resume-pill"><Play weight="fill" /> 继续</span></div>
-              <strong>{book.title}</strong><small>{book.currentChapterTitle || book.author || "尚未开始阅读"}</small><div className="book-progress"><span style={{ width: `${book.progressPercent}%` }} /></div><em>{STATUS_NAMES[book.readingStatus] || (book.progressPercent >= 100 ? "已读" : book.progressPercent > 0 ? "阅读中" : "未读")} · {book.progressPercent}%</em>
-            </button>
-            {selectionMode ? <label className="book-selection" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`选择书籍 ${book.title}`} checked={selectedIds.includes(book.id)} onChange={() => setSelectedIds((ids) => toggleLibrarySelection(ids, book.id))} /></label> : null}
-            <button className="book-more" aria-label={`${book.title}的更多操作`} title="更多操作" onClick={(event) => showBookMenu(event, book)}><DotsThreeVertical weight="bold" /></button>
-          </div>
+          <LibraryBookCard key={book.id} book={book} selectionMode={selectionMode} selected={selectionMode && selectedBooks.has(book.id)} dragging={book.id === draggedId} justImported={book.id === openAfterImportBookId} readerEnabled={readerEnabled} actions={cardActions} />
         ))}
         {loading ? <div className="library-loading">正在读取内容库…</div> : null}
         {!loading && visibleBooks.length === 0 ? (

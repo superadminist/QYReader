@@ -45,3 +45,21 @@ test("responsive columns and row sizes keep every visible row inside the mounted
 test("manual and small libraries keep every book mounted", () => {
   assert.deepEqual(libraryWindow(1025, { ...viewport, top: 64000 }, false), { totalRows: 257, firstRow: 0, endRow: 257 });
 });
+
+test("rapid seeks and reverse scrolls keep every visible row mounted with a bounded buffer", () => {
+  for (const columns of [2, 4, 6]) {
+    for (const height of [480, 800, 1600]) {
+      const rowHeight = 400;
+      const totalRows = Math.ceil(1200 / columns);
+      const maxTop = totalRows * rowHeight - height;
+      for (const position of [0, 1599, 1600, 3199, 3200, 64000, maxTop, 64000, 3200, 1599, 0]) {
+        const scrollTop = Math.min(maxTop, position);
+        const top = libraryViewportTop(scrollTop + 360, 360, rowHeight);
+        const window = libraryWindow(1200, { columns, rowHeight, height, top }, true);
+        assert.ok(window.firstRow * rowHeight <= scrollTop);
+        assert.ok(window.endRow * rowHeight >= scrollTop + height);
+        assert.ok(window.endRow - window.firstRow <= Math.ceil(height / rowHeight) + 24);
+      }
+    }
+  }
+});

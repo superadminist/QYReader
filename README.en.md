@@ -30,7 +30,9 @@ These macOS-inspired UI concepts put the software first, with neutral gray backg
 
 ## Current features
 
-### v2.2.1 · 2026-10-28
+### v2.2.2 · 2026-10-28
+
+- Library rendering: retained book cards skip re-rendering when the virtual window changes; stable callbacks and cached filter/selection data reduce repeated work. Existing composition compatibility settings, buffers, and drag sorting remain in place. Long frames still occur, and the tests did not establish an improvement in every scroll direction.
 
 - Scrolling: enable native wheel interpolation, suspend book-card hover decoration while scrolling, reuse large-library geometry, and fix filtered-list bounds. Real Qt desktop tests still show long frames; this version retains the existing composition compatibility settings and does not guarantee zero dropped frames.
 
@@ -67,9 +69,9 @@ Chapter preparation and cache management are available in the 2.x interface. Exi
 
 | Version | Main changes |
 | --- | --- |
+| [v2.2.2](release-notes/v2.2.2.md) | Avoids re-rendering retained book cards and caches filter/selection data while preserving composition compatibility and existing library behavior. |
 | [v2.2.1](release-notes/v2.2.1.md) | Improves wheel interpolation, scrolling animation cost, and large-library layout work; fixes filtered-list bounds and documents the remaining desktop performance limits. |
 | [v2.2.0](release-notes/v2.2.0.md) | Adds sleep timers, Edge / Kokoro offline chapters, a voice center, backup and restore, and bulk library management, alongside the compact four-color annotation toolbar and shared playback state. |
-| [v2.1.9](release-notes/v2.1.9.md) | Adds the optional Kokoro FP32 model for faster offline generation; improves warm-up, scheduling, and caching while preserving INT8, all eight voices, and existing data. |
 
 Only the latest three versions appear here. See the [full changelog](CHANGELOG.md) or [GitHub Releases](https://github.com/superadminist/QYReader/releases) for older versions. Detailed release notes and the changelog are currently in Chinese. Each release must add `release-notes/vX.Y.Z.md` to provide readable GitHub Release notes.
 
@@ -231,7 +233,7 @@ For manual packaging, build the frontend, install packaging dependencies, and ru
 .venv\Scripts\python.exe -m PyInstaller --clean --noconfirm "QYReader.spec"
 ```
 
-The current version's installer path is `dist\installer\QYReader-Setup-2.2.1.exe`. The installer lets you choose the location and whether to create a desktop shortcut. It defaults to `Program Files\QYReader` and requests administrator privileges when launched. Before release, validate installation, first-launch data migration, upgrading, and data retention after uninstalling. Check WebEngine resources, importing/reading, exit cleanup, and the absence of Node, Vite development servers, or an external Python interpreter in the process tree. A successful build alone does not establish desktop validation.
+The current version's installer path is `dist\installer\QYReader-Setup-2.2.2.exe`. The installer lets you choose the location and whether to create a desktop shortcut. It defaults to `Program Files\QYReader` and requests administrator privileges when launched. Before release, validate installation, first-launch data migration, upgrading, and data retention after uninstalling. Check WebEngine resources, importing/reading, exit cleanup, and the absence of Node, Vite development servers, or an external Python interpreter in the process tree. A successful build alone does not establish desktop validation.
 
 Pushing to `main` triggers the GitHub Actions `Windows installer` workflow, which runs tests and packaging on a Windows runner. The installer and `SHA256SUMS.txt` are retained as build artifacts for 30 days. You can also trigger the workflow manually from GitHub Actions. Generated binaries are not committed to Git.
 

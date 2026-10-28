@@ -30,7 +30,9 @@
 
 ## 当前版本能力
 
-### v2.2.1 · 2026-10-28
+### v2.2.2 · 2026-10-28
+
+- 书架进一步减负：切换大书库显示范围时，保留书卡跳过重复渲染；稳定事件回调并缓存筛选、多选数据。保留原有防闪白配置、列表缓冲和拖拽排序；实际滚动仍可能出现长帧，未确认所有方向均有提升。
 
 - 滚动优化：主窗口开启原生平滑滚动；滚动期间暂停书卡悬停装饰，停止后恢复；大书库复用布局尺寸，减少重复渲染并修复筛选边界。真实 Qt 桌面仍有长帧，不保证全程零掉帧；保留既有防闪白兼容配置。
 
@@ -67,9 +69,9 @@
 
 | 版本 | 主要更新 |
 | --- | --- |
+| [v2.2.2](release-notes/v2.2.2.md) | 减少保留书卡的重复渲染，缓存筛选与多选数据；保留防闪白配置和现有书架行为。 |
 | [v2.2.1](release-notes/v2.2.1.md) | 优化滚轮过渡、滚动期间动画及大书库布局开销，修复筛选边界；保留兼容渲染并明确实测限制。 |
 | [v2.2.0](release-notes/v2.2.0.md) | 新增睡眠定时、Edge / Kokoro 章节离线听书、音色中心、备份恢复及书架批量管理，保留选区旁的四色笔记浮条与共享朗读状态。 |
-| [v2.1.9](release-notes/v2.1.9.md) | 新增可选 Kokoro 普通版提速，优化模型预热、生成排队及缓存，保留 INT8、八种声线与旧数据。 |
 
 此处仅保留最新 3 个版本。更早版本请查看 [完整更新历史](CHANGELOG.md) 或 [GitHub Releases](https://github.com/superadminist/QYReader/releases)。每次发布都必须新增 `release-notes/vX.Y.Z.md`，用于生成用户可读的 Release 说明。
 
@@ -231,7 +233,7 @@ build.bat
 .venv\Scripts\python.exe -m PyInstaller --clean --noconfirm "QYReader.spec"
 ```
 
-当前版本的安装包路径为 `dist\installer\QYReader-Setup-2.2.1.exe`。安装向导允许选择安装路径和是否创建桌面图标，默认安装到系统 `Program Files\QYReader`，启动安装程序时会自动请求管理员权限。发布前必须实际完成安装、首次数据迁移、覆盖升级和卸载保留数据验证，并检查 WebEngine 静态资源、导入/阅读、窗口退出清理，以及进程树中不存在 Node、Vite 开发服务器或外部 Python 解释器。仅仅“构建成功”不等于桌面验收通过。
+当前版本的安装包路径为 `dist\installer\QYReader-Setup-2.2.2.exe`。安装向导允许选择安装路径和是否创建桌面图标，默认安装到系统 `Program Files\QYReader`，启动安装程序时会自动请求管理员权限。发布前必须实际完成安装、首次数据迁移、覆盖升级和卸载保留数据验证，并检查 WebEngine 静态资源、导入/阅读、窗口退出清理，以及进程树中不存在 Node、Vite 开发服务器或外部 Python 解释器。仅仅“构建成功”不等于桌面验收通过。
 
 推送到 `main` 后，GitHub Actions 的 `Windows installer` 工作流会在 Windows Runner 上运行测试和完整打包，并将安装包及 `SHA256SUMS.txt` 保存为 30 天有效的构建产物。也可以在 GitHub Actions 页面手动触发该工作流；生成文件不会提交进 Git。
 
