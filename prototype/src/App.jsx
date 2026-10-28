@@ -52,6 +52,7 @@ import { windowControlPresentation } from "./windowControls.js";
 import { shouldApplyAudioWindow, windowContainsSentence } from "./readerWindowSync.js";
 import { readerPositionFromPointer } from "./readerPosition.js";
 import { libraryDropTarget, moveLibraryBook } from "./libraryOrder.js";
+import { libraryViewportTop, libraryWindow } from "./libraryViewport.js";
 
 const EMPTY_CONTROLS = {
   minimizeWindow() {},
@@ -399,12 +400,38 @@ const Library = memo(function Library({
     && filters.tags.every((tag) => (book.tagIds || []).includes(tag))), [orderedBooks, normalizedQuery, filters]);
   const filtering = filters.type !== "all" || filters.category !== "all" || filters.status !== "all" || filters.tags.length > 0;
   const canDrag = !selectionMode && sortMode === "manual" && !normalizedQuery && !filtering && !loading && !sortPending;
-  const totalRows = Math.ceil(visibleBooks.length / gridViewport.columns);
   // Keep several screens mounted and advance in batches. The software Qt
   // compositor otherwise rasterizes newly mounted covers on every scroll row.
-  const firstRow = virtualLibrary ? Math.min(Math.max(0, totalRows - 1), Math.max(0, Math.floor(gridViewport.top / gridViewport.rowHeight / 8) * 8 - 8)) : 0;
-  const endRow = virtualLibrary ? Math.min(totalRows, Math.ceil((gridViewport.top + gridViewport.height) / gridViewport.rowHeight / 8) * 8 + 8) : totalRows;
+  const { totalRows, firstRow, endRow } = libraryWindow(visibleBooks.length, gridViewport, virtualLibrary);
   const renderedBooks = virtualLibrary ? visibleBooks.slice(firstRow * gridViewport.columns, Math.max(firstRow + 1, endRow) * gridViewport.columns) : visibleBooks;
+  useEffect(() => {
+    const page = pageRef.current;
+    let timer;
+    let scrolling = false;
+    const settle = () => {
+      scrolling = false;
+      delete page.dataset.scrolling;
+    };
+    const markScrolling = (event) => {
+      if (event.type === "wheel" && (event.ctrlKey || !event.deltaY)) return;
+      // A stationary pointer crosses many cards during scrolling. Freeze only
+      // their hover decoration, without blocking clicks or native scrolling.
+      if (!scrolling) {
+        scrolling = true;
+        page.dataset.scrolling = "true";
+      }
+      clearTimeout(timer);
+      timer = setTimeout(settle, 180);
+    };
+    page.addEventListener("wheel", markScrolling, { passive: true });
+    page.addEventListener("scroll", markScrolling, { passive: true });
+    return () => {
+      clearTimeout(timer);
+      page.removeEventListener("wheel", markScrolling);
+      page.removeEventListener("scroll", markScrolling);
+      settle();
+    };
+  }, []);
   useEffect(() => {
     if (typeof IntersectionObserver === "undefined") return;
     const cards = gridRef.current?.querySelectorAll(".book-card") || [];
@@ -437,22 +464,57 @@ const Library = memo(function Library({
     if (!virtualLibrary) return;
     const page = pageRef.current;
     const grid = gridRef.current;
-    let frame = 0;
+    let measureFrame = 0;
+    let scrollFrame = 0;
+    let geometry;
+    let publishedViewport;
+    const updateViewport = () => {
+      if (!geometry) return;
+      const { columns, rowHeight, gridOffset, height } = geometry;
+      const top = libraryViewportTop(page.scrollTop, gridOffset, rowHeight);
+      if (publishedViewport && publishedViewport.columns === columns && publishedViewport.rowHeight === rowHeight && publishedViewport.top === top && publishedViewport.height === height) return;
+      const nextViewport = { columns, rowHeight, top, height };
+      publishedViewport = nextViewport;
+      setGridViewport(previous => previous.columns === columns && previous.rowHeight === rowHeight && previous.top === top && previous.height === height ? previous : nextViewport);
+    };
     const measure = () => {
+      measureFrame = 0;
       const styles = getComputedStyle(grid);
       const columns = styles.gridTemplateColumns.split(" ").length;
       const gap = parseFloat(styles.rowGap) || 0;
       const card = grid.querySelector(".book-card");
       const rowHeight = card ? card.getBoundingClientRect().height + gap : 400;
-      const top = Math.floor(Math.max(0, page.getBoundingClientRect().top - grid.getBoundingClientRect().top) / rowHeight / 8) * rowHeight * 8;
-      setGridViewport(previous => previous.columns === columns && previous.rowHeight === rowHeight && previous.top === top && previous.height === page.clientHeight ? previous : { columns, rowHeight, top, height: page.clientHeight });
+      const gridOffset = grid.getBoundingClientRect().top - page.getBoundingClientRect().top + page.scrollTop;
+      geometry = { columns, rowHeight, gridOffset, height: page.clientHeight };
+      updateViewport();
     };
-    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(measure); };
-    const observer = new ResizeObserver(schedule);
+    const scheduleMeasure = () => { if (!measureFrame) measureFrame = requestAnimationFrame(measure); };
+    const scheduleScroll = () => { if (!scrollFrame) scrollFrame = requestAnimationFrame(() => { scrollFrame = 0; updateViewport(); }); };
+    const observer = new ResizeObserver(scheduleMeasure);
     observer.observe(page);
-    page.addEventListener("scroll", schedule, { passive: true });
+    // Notices, filters and batch controls can shift the grid without resizing
+    // the page. Do not observe grid height: virtual padding changes on scroll.
+    const observedHeaders = new Set();
+    const observeHeaders = () => {
+      for (const child of observedHeaders) {
+        if (child.parentElement !== page) {
+          observer.unobserve(child);
+          observedHeaders.delete(child);
+        }
+      }
+      for (const child of page.children) {
+        if (child !== grid && !observedHeaders.has(child)) {
+          observer.observe(child);
+          observedHeaders.add(child);
+        }
+      }
+    };
+    observeHeaders();
+    const contentObserver = new MutationObserver(() => { observeHeaders(); scheduleMeasure(); });
+    contentObserver.observe(page, { childList: true });
+    page.addEventListener("scroll", scheduleScroll, { passive: true });
     measure();
-    return () => { observer.disconnect(); page.removeEventListener("scroll", schedule); cancelAnimationFrame(frame); };
+    return () => { observer.disconnect(); contentObserver.disconnect(); page.removeEventListener("scroll", scheduleScroll); cancelAnimationFrame(measureFrame); cancelAnimationFrame(scrollFrame); };
   }, [virtualLibrary, visibleBooks]);
   useLayoutEffect(() => {
     // Card measurements are needed only for actual manual reorder animations.
@@ -2522,7 +2584,7 @@ function MainApplication() {
     ? { fileImport: true, pasteImport: true, webImport: true, audioImport: true }
     : capabilities, [bridgeMode, capabilities]);
   const reloadLibraryFeatures = async () => { const connection = connectionRef.current; if (!connection) return; const r = await connection.library.getState(); setBooks(r.data.books); setLibrarySortMode(r.data.sortMode); };
-  const libraryActions = useStableActions({ setSortMode: setLibrarySort, moveBook: moveLibraryItem, revealSource, openBook, removeBook, openPaste: () => setPasteOpen(true), openWeb: () => setWebOpen(true), selectFiles, showUnavailable, cancelImport });
+  const libraryActions = useStableActions({ setSortMode: setLibrarySort, moveBook: moveLibraryItem, revealSource, openBook, removeBook, openPaste: () => setPasteOpen(true), openWeb: () => setWebOpen(true), selectFiles, showUnavailable, cancelImport, onReload: () => reloadLibraryFeatures().catch((e) => setBridgeError(e.message)) });
   useEffect(() => {
     const onKeyDown = (event) => {
       const target = event.target;
@@ -2566,7 +2628,7 @@ function MainApplication() {
               ? <DemoReader setPage={setPage} fontSize={fontSize} setFontSize={setFontSize} playing={playing} setPlaying={setPlaying} floating={floating} setFloating={setFloating} networkNotice={networkNotice} />
               : page === "reader" && bridgeMode === "native"
                 ? <NativeReader voiceOptions={speechState.voices} features={connectionRef.current?.features} state={readerState} networkNotice={networkNotice} selectedStart={selectedReaderStart} onChooseStart={chooseReaderStart} onBack={() => setPage("library")} onNavigate={navigateReader} onGetWindow={getReaderWindow} onUpdatePosition={updateReaderPosition} onSearch={searchReader} onLoadBookmarks={loadReaderBookmarks} onAddBookmark={addReaderBookmark} onRemoveBookmark={removeReaderBookmark} onBookmarkSaved={(bookmark) => dispatchReader({ type: "BOOKMARK_SAVED", bookmark })} onCommand={controlReaderPlayback} onSettings={updateReaderSettings} floatingAvailable={capabilities.floatingReader} floatingVisible={Boolean(nativeFloatingState?.visible)} onFloatingToggle={switchToFloatingReader} onOpenSettings={(tab = "reading") => { setSettingsInitialTab(tab); setSettingsOpen(true); }} />
-                : <Library features={connectionRef.current?.features} onReload={() => reloadLibraryFeatures().catch((e) => setBridgeError(e.message))} {...libraryActions} books={books} sortMode={librarySortMode} error={bridgeError} loading={libraryLoading} capabilities={effectiveCapabilities} readerEnabled={readerEnabled} importState={importState} openAfterImportBookId={openAfterImportBookId} />}
+                : <Library features={connectionRef.current?.features} {...libraryActions} books={books} sortMode={librarySortMode} error={bridgeError} loading={libraryLoading} capabilities={effectiveCapabilities} readerEnabled={readerEnabled} importState={importState} openAfterImportBookId={openAfterImportBookId} />}
           </main>
         </div>
       </div>

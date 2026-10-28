@@ -131,6 +131,10 @@ def _inject_qwebchannel_script(page: QWebEnginePage) -> None:
 def _configure_main_web_view(view: QWebEngineView, page: QWebEnginePage) -> None:
     """Keep the page transparent for CSS and the native alpha corner guard."""
     view.setObjectName("mainWebView")
+    # Qt disables the Chromium scroll animator by default. Let the browser
+    # interpolate wheel ticks instead of jumping by an entire tick at once.
+    # Apply before the first page load: existing scroll areas keep their animator.
+    page.settings().setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True)
     page.setBackgroundColor(QColor(0, 0, 0, 0))
     view.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
     view.setStyleSheet("QWebEngineView#mainWebView { background: transparent; }")

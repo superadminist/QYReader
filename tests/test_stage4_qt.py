@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from PySide6.QtCore import QCoreApplication, QObject, QRect, Qt
+from PySide6.QtWebEngineCore import QWebEngineSettings
 
 from novelreader.floating_reader_service import (
     FloatingReaderError,
@@ -228,6 +229,12 @@ class Stage4FloatingServiceTests(unittest.TestCase):
                 self.style = style
 
         class Page:
+            def __init__(self):
+                self.web_settings = mock.Mock()
+
+            def settings(self):
+                return self.web_settings
+
             def setBackgroundColor(self, color):
                 self.color = color
 
@@ -240,9 +247,13 @@ class Stage4FloatingServiceTests(unittest.TestCase):
         translucent = Qt.WidgetAttribute.WA_TranslucentBackground
         self.assertEqual(main_view.attributes, [(translucent, True)])
         self.assertEqual(main_page.color.alpha(), 0)
+        main_page.web_settings.setAttribute.assert_called_once_with(
+            QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True
+        )
         self.assertIn("background: transparent", main_view.style)
         self.assertEqual(floating_view.attributes, [(translucent, True)])
         self.assertEqual(floating_page.color.alpha(), 0)
+        floating_page.web_settings.setAttribute.assert_not_called()
         self.assertIn("background: transparent", floating_view.style)
 
     def test_minimize_to_tray_is_silent(self):

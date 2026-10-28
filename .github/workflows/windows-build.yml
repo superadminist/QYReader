@@ -44,6 +44,7 @@ jobs:
       - name: Test and build frontend
         run: |
           npm.cmd --prefix prototype run test:bridge
+          npm.cmd --prefix prototype run test:library
           npm.cmd --prefix prototype run build
           npm.cmd --prefix prototype run test:sites
 

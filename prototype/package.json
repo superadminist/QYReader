@@ -8,6 +8,7 @@
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "preview": "vite preview",
     "test:bridge": "node --test tests/bridge.test.mjs tests/reader-features.test.mjs tests/annotation-position.test.mjs",
+    "test:library": "node --test tests/library-order.test.mjs tests/library-viewport.test.mjs",
     "test:sites": "node --test tests/sites-worker.test.mjs"
   },
   "dependencies": {
