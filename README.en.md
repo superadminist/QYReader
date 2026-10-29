@@ -2,6 +2,19 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
+<p align="center">
+  <a href="https://github.com/superadminist/QYReader/stargazers"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/superadminist/QYReader?style=flat-square"></a>
+  <a href="https://github.com/superadminist/QYReader/releases/latest"><img alt="Latest Release" src="https://img.shields.io/github/v/release/superadminist/QYReader?style=flat-square"></a>
+  <a href="https://github.com/superadminist/QYReader/releases"><img alt="Total Release Asset Downloads" src="https://img.shields.io/github/downloads/superadminist/QYReader/total?style=flat-square"></a>
+  <a href="https://github.com/superadminist/QYReader/actions/workflows/windows-build.yml"><img alt="Windows Build Status" src="https://img.shields.io/github/actions/workflow/status/superadminist/QYReader/windows-build.yml?branch=main&amp;style=flat-square&amp;label=Windows%20build"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/superadminist/QYReader/releases/latest"><strong>Download Latest</strong></a> ·
+  <a href="https://github.com/superadminist/QYReader/stargazers">Star if you find it useful</a> ·
+  <a href="https://github.com/superadminist/QYReader/issues">Feedback &amp; Suggestions</a>
+</p>
+
 <p align="center"><img src="assets/qyreader-icon.png" alt="QYReader icon" width="144"></p>
 
 QYReader is a local novel and document reader for Windows. The 2.x desktop application uses **PySide6 / Qt WebEngine** to host a React interface, with QWebChannel connecting it to local Python services. Your library, text, reading progress, and settings are stored on your computer by default.

@@ -2,6 +2,19 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
+<p align="center">
+  <a href="https://github.com/superadminist/QYReader/stargazers"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/superadminist/QYReader?style=flat-square"></a>
+  <a href="https://github.com/superadminist/QYReader/releases/latest"><img alt="最新版本" src="https://img.shields.io/github/v/release/superadminist/QYReader?style=flat-square"></a>
+  <a href="https://github.com/superadminist/QYReader/releases"><img alt="Release 附件下载总量" src="https://img.shields.io/github/downloads/superadminist/QYReader/total?style=flat-square"></a>
+  <a href="https://github.com/superadminist/QYReader/actions/workflows/windows-build.yml"><img alt="Windows 构建状态" src="https://img.shields.io/github/actions/workflow/status/superadminist/QYReader/windows-build.yml?branch=main&amp;style=flat-square&amp;label=Windows%20build"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/superadminist/QYReader/releases/latest"><strong>下载最新版</strong></a> ·
+  <a href="https://github.com/superadminist/QYReader/stargazers">如果有帮助，请点 Star</a> ·
+  <a href="https://github.com/superadminist/QYReader/issues">问题反馈与建议</a>
+</p>
+
 <p align="center"><img src="assets/qyreader-icon.png" alt="QYReader 启远阅读图标" width="144"></p>
 
 启远阅读（QYReader）是面向 Windows 的本地小说阅读器。2.x 桌面版使用 **PySide6 / Qt WebEngine** 承载 React 界面，通过 QWebChannel 调用本地 Python 服务；书架、正文、进度和设置默认只保存在本机。
