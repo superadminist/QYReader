@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://superadminist.github.io/QYReader/">项目官网</a> ·
   <a href="https://github.com/superadminist/QYReader/releases/latest"><strong>下载最新版</strong></a> ·
   <a href="https://github.com/superadminist/QYReader/stargazers">如果有帮助，请点 Star</a> ·
   <a href="https://github.com/superadminist/QYReader/issues">问题反馈与建议</a>

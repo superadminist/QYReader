@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://superadminist.github.io/QYReader/">Official Website</a> ·
   <a href="https://github.com/superadminist/QYReader/releases/latest"><strong>Download Latest</strong></a> ·
   <a href="https://github.com/superadminist/QYReader/stargazers">Star if you find it useful</a> ·
   <a href="https://github.com/superadminist/QYReader/issues">Feedback &amp; Suggestions</a>
