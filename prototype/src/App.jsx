@@ -40,6 +40,8 @@ import OfflineCachePanel from "./OfflineCachePanel.jsx";
 import VoiceCenter from "./VoiceCenter.jsx";
 import SleepTimerControl from "./SleepTimerControl.jsx";
 import AnnotationPopover from "./AnnotationPopover.jsx";
+import ReaderContextMenu from "./ReaderContextMenu.jsx";
+import { copyReaderText } from "./readerContext.js";
 import { floatingLyricTransition, floatingSentenceIdentity } from "./floatingLyrics.js";
 import {
   floatingFontWheelChange,
@@ -1445,16 +1447,21 @@ const ChapterDirectory = memo(function ChapterDirectory({ chapters, selectedInde
   return <div ref={listRef} className="toc-list virtual-toc" role="listbox" aria-label="章节目录" onKeyDown={handleKey} onScroll={() => {
     cancelAnimationFrame(frameRef.current);
     frameRef.current = requestAnimationFrame(measure);
-  }}><div className="toc-spacer" style={{ height: chapters.length * rowHeight }}><div className="toc-visible" style={{ transform: `translateY(${first * rowHeight}px)` }}>{chapters.slice(first, last).map((chapter) => <button key={chapter.index} data-chapter-index={chapter.index} role="option" aria-selected={selectedIndex === chapter.index} aria-posinset={chapter.index + 1} aria-setsize={chapters.length} title={chapter.title} className={selectedIndex === chapter.index ? "selected" : ""} onClick={() => onNavigate({ kind: "position", chapterIndex: chapter.index, charOffset: 0 })}><span>{String(chapter.index + 1).padStart(2, "0")}</span><span className="chapter-title">{chapter.title}</span></button>)}</div></div></div>;
+  }}><div className="toc-spacer" style={{ height: chapters.length * rowHeight }}><div className="toc-visible" style={{ transform: `translateY(${first * rowHeight}px)` }}>{chapters.slice(first, last).map((chapter) => {
+    const displayTitle = chapter.displayTitle || chapter.title;
+    const continuation = chapter.continuationLabel || "";
+    const fullTitle = `${displayTitle}${continuation}`;
+    return <button key={chapter.index} data-chapter-index={chapter.index} role="option" aria-label={`${chapter.index + 1} ${fullTitle}`} aria-selected={selectedIndex === chapter.index} aria-posinset={chapter.index + 1} aria-setsize={chapters.length} title={fullTitle} className={selectedIndex === chapter.index ? "selected" : ""} onClick={() => onNavigate({ kind: "position", chapterIndex: chapter.index, charOffset: 0 })}><span>{String(chapter.index + 1).padStart(2, "0")}</span><span className="chapter-title">{displayTitle}</span>{continuation ? <span className="chapter-continuation">{continuation}</span> : null}</button>;
+  })}</div></div></div>;
 });
 
 function NativeReaderToolbar({ data, panelMode, setPanelMode, onBack, onSettings, floatingAvailable, floatingVisible, onFloatingToggle, onOpenSettings, onPrepareOffline }) {
   const { settings } = data;
   return (
     <div className="reader-toolbar">
-      <div className="toolbar-group"><IconButton label="返回内容库" onClick={onBack}><ArrowLeft /></IconButton><IconButton label="目录" active={panelMode === "toc"} onClick={() => setPanelMode("toc")}><SidebarSimple /></IconButton><span className="toolbar-title">{data.book.title}</span></div>
+      <div className="toolbar-group"><IconButton label="返回内容库" onClick={onBack}><ArrowLeft /></IconButton><IconButton label="目录" active={panelMode === "toc"} onClick={() => setPanelMode(panelMode === "toc" ? null : "toc")}><SidebarSimple /></IconButton><span className="toolbar-title">{data.book.title}</span></div>
       <div className="toolbar-group toolbar-center"><IconButton label="缩小字号" onClick={() => onSettings({ fontSize: Math.max(12, settings.fontSize - 1) })}><Minus /></IconButton><span className="font-value">{settings.fontSize}</span><IconButton label="放大字号" onClick={() => onSettings({ fontSize: Math.min(40, settings.fontSize + 1) })}><Plus /></IconButton><button className="speed" onClick={() => onSettings({ paragraphMode: settings.paragraphMode % 3 + 1 })}><TextAa /> 排版 {settings.paragraphMode}</button></div>
-      <div className="toolbar-group"><IconButton label="书内搜索" active={panelMode === "search"} onClick={() => setPanelMode("search")}><MagnifyingGlass /></IconButton><IconButton label="书签" active={panelMode === "bookmarks"} onClick={() => setPanelMode("bookmarks")}><PushPin /></IconButton>{floatingAvailable ? <IconButton label="切换到悬浮朗读" active={floatingVisible} onClick={onFloatingToggle}><CornersOut /></IconButton> : null}<IconButton label="准备离线听书" onClick={onPrepareOffline}><Headphones /></IconButton><IconButton label="更多设置" onClick={onOpenSettings}><GearSix /></IconButton></div>
+      <div className="toolbar-group"><IconButton label="书内搜索" active={panelMode === "search"} onClick={() => setPanelMode("search")}><MagnifyingGlass /></IconButton><IconButton label="书签" active={panelMode === "bookmarks"} onClick={() => setPanelMode("bookmarks")}><PushPin /></IconButton>{floatingAvailable ? <IconButton label="切换到悬浮朗读" active={floatingVisible} onClick={onFloatingToggle}><CornersOut /></IconButton> : null}<IconButton label="准备离线听书" onClick={onPrepareOffline}><Headphones /></IconButton><IconButton label="更多设置" onClick={() => onOpenSettings("reading")}><GearSix /></IconButton></div>
     </div>
   );
 }
@@ -1611,19 +1618,52 @@ export function NativeReader({ state, networkNotice, selectedStart, onChooseStar
       if (visible) onUpdatePosition(windowData.chapterIndex, Number(visible.dataset.startOffset));
     }, 500);
   };
+  const menuAction = async (action) => {
+    const sessionId = data.sessionId;
+    setNoteActionError("");
+    try { await action(); }
+    catch (error) { if (noteSessionRef.current === sessionId) setNoteActionError(error.message || "操作失败，请重试。"); }
+  };
+  const readFrom = (target) => {
+    window.clearTimeout(scrollTimerRef.current);
+    scrollTimerRef.current = null;
+    onChooseStart(target.position || { kind: "position", chapterIndex: target.chapterIndex, charOffset: target.startOffset });
+    window.getSelection()?.removeAllRanges();
+    closeSelection();
+    return onCommand("play");
+  };
 
   return (
     <section className="reader-page native-reader">
       <NativeReaderToolbar onPrepareOffline={() => setCacheOpen(true)} data={data} panelMode={panelMode} setPanelMode={changePanel} onBack={onBack} onSettings={onSettings} floatingAvailable={floatingAvailable} floatingVisible={floatingVisible} onFloatingToggle={onFloatingToggle} onOpenSettings={onOpenSettings} />
-      <div className="reader-layout">
-        <aside className="toc-panel">
+      <div className={`reader-layout${panelMode ? "" : " directory-hidden"}`}>
+        <aside className="toc-panel" hidden={!panelMode}>
           <div className="toc-title"><span>{panelMode === "toc" ? "目录" : panelMode === "search" ? "书内搜索" : "书签与笔记"}</span><small>{panelMode === "toc" ? `${data.book.chapters.length} 章` : ""}</small></div>
           {panelMode === "toc" ? <ChapterDirectory chapters={data.book.chapters} selectedIndex={data.position.chapterIndex} onNavigate={navigate} /> : null}
           {panelMode === "search" ? <div className="reader-side-content"><form onSubmit={submitSearch}><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入关键词后回车" /><button className="primary-button" type="submit">搜索</button></form>{state.search.status === "loading" ? <p>正在搜索真实正文…</p> : null}{state.search.error ? <p className="reader-side-error">{state.search.error}</p> : null}{state.search.page?.results.map((result) => <button key={result.id} className="reader-side-result" onClick={() => navigate({ kind: "position", chapterIndex: result.chapterIndex, charOffset: result.startOffset })}><strong>{result.chapterTitle}</strong><span>{result.excerpt}</span></button>)}{state.search.status === "ready" && state.search.page?.total === 0 ? <p>没有匹配内容</p> : null}</div> : null}
           {panelMode === "bookmarks" ? <div className="reader-side-content">{playback.sentence ? <button className="primary-button bookmark-current" onClick={() => onAddBookmark(playback.sentence)}>收藏当前句</button> : <p>开始朗读后可收藏当前句。</p>}<div className="feature-actions"><button className="secondary-button" onClick={() => exportNotes("md")}>导出Markdown</button><button className="secondary-button" onClick={() => exportNotes("txt")}>导出TXT</button></div>{state.bookmarks.status === "loading" ? <p>正在读取书签…</p> : null}{state.bookmarks.error ? <p className="reader-side-error">{state.bookmarks.error}</p> : null}{state.bookmarks.page?.items.map((bookmark) => <div key={bookmark.id} className="reader-bookmark"><button disabled={bookmark.locationValid === false} onClick={() => navigate({ kind: "position", chapterIndex: bookmark.chapterIndex, charOffset: bookmark.startOffset })}><strong>{bookmark.chapterTitle}</strong><span>{bookmark.text}</span></button><p className="bookmark-note">{bookmark.note}</p>{bookmark.locationValid === false ? <small>定位失效，请核对正文</small> : null}<button aria-label={`编辑笔记 ${bookmark.text}`} onClick={() => setEditingNote(bookmark)}>编辑</button><button aria-label={`删除书签 ${bookmark.text}`} onClick={() => onRemoveBookmark(bookmark.id).catch((e) => setNoteActionError(e.message))}><X /></button></div>)}{state.bookmarks.status === "ready" && state.bookmarks.page?.total === 0 ? <p>暂无书签</p> : null}</div> : null}
           <div className="toc-footer"><UploadSimple /> 已同步阅读进度</div>
         </aside>
-        <article ref={readingSheetRef} className={`reading-sheet paragraph-mode-${data.settings.paragraphMode}`} style={{ "--reading-size": `${data.settings.fontSize}px`, "--reading-line-height": data.settings.lineSpacing, fontFamily: data.settings.fontFamily }} onScroll={handleScroll}>
+        <ReaderContextMenu
+          resetKey={`${data.sessionId}:${windowData.chapterIndex}:${windowData.windowStartOffset}`}
+          chapterIndex={windowData.chapterIndex} annotations={activeAnnotations}
+          canOpen={() => !annotationLockedRef.current} onPrepare={closeSelection}
+          onRead={(target) => menuAction(() => readFrom(target))}
+          onBookmark={(target) => menuAction(async () => {
+            await onAddBookmark({ ...target, kind: "bookmark" });
+            if (noteSessionRef.current === data.sessionId) setNoteFeedback("书签已添加");
+          })}
+          onCopy={(text) => menuAction(async () => {
+            await copyReaderText(text);
+            if (noteSessionRef.current === data.sessionId) setNoteFeedback("文字已复制");
+          })}
+          onSave={(target) => menuAction(() => saveNote(target))} onEdit={chooseAnnotation}
+          onRemove={(id) => menuAction(() => removeNote(id))}
+          canLocate={Boolean(playback.sentence)} playbackPending={Boolean(state.pendingCommand)} onLocate={locateCurrentSentence}
+          directoryVisible={panelMode === "toc"} onToggleDirectory={() => changePanel(panelMode === "toc" ? null : "toc")}
+          onSettings={() => onOpenSettings("reading")} floatingAvailable={floatingAvailable} onFloating={onFloatingToggle}
+        >
+        <article ref={readingSheetRef} tabIndex={0} aria-label="阅读正文" className={`reading-sheet paragraph-mode-${data.settings.paragraphMode}`} style={{ "--reading-size": `${data.settings.fontSize}px`, "--reading-line-height": data.settings.lineSpacing, fontFamily: data.settings.fontFamily }} onScroll={handleScroll}>
           <p className="chapter-index">CHAPTER {String(windowData.chapterIndex + 1).padStart(2, "0")}</p><h1>{windowData.chapterTitle}</h1><div className="title-rule" />
           {state.windowLoading ? <div className="reader-window-loading">正在加载正文窗口…</div> : null}
           {windowData.hasBefore ? <button className="window-load-button" onClick={() => onGetWindow(windowData.chapterIndex, windowData.windowStartOffset)}>加载前文</button> : null}
@@ -1631,10 +1671,11 @@ export function NativeReader({ state, networkNotice, selectedStart, onChooseStar
           {windowData.hasAfter ? <button className="window-load-button" onClick={() => onGetWindow(windowData.chapterIndex, windowData.windowEndOffset)}>加载后文</button> : null}
           <div className="page-count">{data.position.progressPercent.toFixed(1)}%</div>
         </article>
+        </ReaderContextMenu>
       </div>
       {cacheOpen ? <OfflineCachePanel features={features} book={data.book} currentChapterIndex={playback.position.chapterIndex} voices={voiceOptions} requestedVoiceId={data.settings.ttsVoiceId} rate={data.settings.ttsRate} onClose={() => setCacheOpen(false)} onOpenModels={() => { setCacheOpen(false); onOpenSettings("voices"); }} /> : null}
       <NativePlayer features={features} playback={playback} chapterTitle={chapterTitle} pendingCommand={state.pendingCommand} selectedStart={selectedStart} onCommand={onCommand} onNavigate={navigate} onSettings={onSettings} onLocate={locateCurrentSentence} settings={data.settings} networkNotice={networkNotice} />
-      {selection ? <AnnotationPopover key={`${data.sessionId}:${selection.selectionToken}`} selection={selection} sheetRef={readingSheetRef} onSave={saveNote} onRemove={removeNote} onClose={closeSelection} onInteractionLockChange={lockAnnotation} onRead={(target) => { onChooseStart({ kind: "position", chapterIndex: target.chapterIndex, charOffset: target.startOffset }); window.getSelection()?.removeAllRanges(); closeSelection(); onCommand("play"); }} /> : null}
+      {selection ? <AnnotationPopover key={`${data.sessionId}:${selection.selectionToken}`} selection={selection} sheetRef={readingSheetRef} onSave={saveNote} onRemove={removeNote} onClose={closeSelection} onInteractionLockChange={lockAnnotation} onRead={(target) => menuAction(() => readFrom(target))} /> : null}
       {noteFeedback ? <div className="annotation-feedback" role="status">{noteFeedback}</div> : null}
       {noteActionError ? <p className="reader-side-error" role="alert">{noteActionError}</p> : null}
       {editingNote ? <NoteEditor value={editingNote} onSave={saveNote} onClose={() => setEditingNote(null)} /> : null}
@@ -2595,7 +2636,7 @@ function MainApplication() {
   useEffect(() => {
     const onKeyDown = (event) => {
       const target = event.target;
-      if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable=true]")) return;
+      if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable=true], [role=menu]")) return;
       if (event.key === "F11" || (event.altKey && event.key === "Enter")) {
         event.preventDefault();
         windowControls.toggleFullscreen();
@@ -2623,7 +2664,7 @@ function MainApplication() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [readerState, windowControls, nativeFloatingState]);
   return (
-    <div className={`prototype-stage ${desktopMode ? "desktop-host" : ""} ${floating && bridgeMode === "demo" ? "demo-floating-active" : ""} theme-${appPreferences.colorScheme}`} data-theme={appPreferences.theme} data-resizing={windowInteractionActive ? "true" : "false"} data-window-mode={windowState.isFullScreen ? "fullscreen" : windowState.isMaximized ? "maximized" : "normal"}>
+    <div className={`prototype-stage ${desktopMode ? "desktop-host" : ""} ${floating && bridgeMode === "demo" ? "demo-floating-active" : ""} theme-${appPreferences.colorScheme}`} data-theme={appPreferences.theme} data-resizing={windowInteractionActive ? "true" : "false"} data-window-mode={windowState.isFullScreen ? "fullscreen" : windowState.isMaximized ? "maximized" : "normal"} onContextMenu={(event) => { if (!event.target.closest("input, textarea, [contenteditable=true]")) event.preventDefault(); }}>
       {desktopMode ? <WindowResizeHandles controls={windowControls} /> : null}
       <ActivityReporter features={connectionRef.current?.features} surface="main" sessionId={readerState.data?.sessionId || ""} visible={page === "reader" && !settingsOpen && !pasteOpen && !webOpen} />
       <div className="mac-window">

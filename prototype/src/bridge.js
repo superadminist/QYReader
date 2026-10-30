@@ -546,6 +546,8 @@ function validReaderOpenData(data) {
       chapter
       && nonNegativeInteger(chapter.index)
       && typeof chapter.title === "string"
+      && (chapter.displayTitle === undefined || typeof chapter.displayTitle === "string")
+      && (chapter.continuationLabel === undefined || typeof chapter.continuationLabel === "string")
       && nonNegativeInteger(chapter.charCount)
     ))
     && validReaderPosition(data.position)
@@ -1503,7 +1505,7 @@ function createDemoConnection() {
           ok: true,
           data: {
             sessionId: demoSessionId,
-            book: { id: bookId, title: DEMO_BOOKS.find((book) => book.id === bookId)?.title || "演示内容", author: "", format: "EPUB", totalChars: DEMO_READER_TEXT.length, chapters: [{ index: 0, title: "第六章　运气的成分", charCount: DEMO_READER_TEXT.length }] },
+            book: { id: bookId, title: DEMO_BOOKS.find((book) => book.id === bookId)?.title || "演示内容", author: "", format: "EPUB", totalChars: DEMO_READER_TEXT.length, chapters: [{ index: 0, title: "第六章　运气的成分", displayTitle: "第六章　运气的成分", continuationLabel: "", charCount: DEMO_READER_TEXT.length }] },
             position: demoPosition,
             window: demoReaderWindow(demoSessionId, bookId),
             settings: demoReaderSettings(),

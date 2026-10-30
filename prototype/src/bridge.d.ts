@@ -222,6 +222,8 @@ export interface ReaderPosition {
 }
 
 export interface ReaderChapterSummary {
+  displayTitle?: string;
+  continuationLabel?: string;
   index: number;
   title: string;
   charCount: number;

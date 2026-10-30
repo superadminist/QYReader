@@ -8,7 +8,7 @@ export default function AnnotationPopover({ selection, sheetRef, onSave, onRemov
   const busyRef = useRef(false);
   const keyboardFocusedRef = useRef(false);
   const [position, setPosition] = useState(null);
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(Boolean(selection.initialEditing));
   const [note, setNote] = useState(selection.note || "");
   const [color, setColor] = useState(selection.color || "yellow");
   const [pending, setPending] = useState(false);

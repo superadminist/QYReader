@@ -10,6 +10,8 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 ## Confirmed design direction
 
+- Chapter-directory smart names are presentation metadata only. Preserve existing chapter boundaries, source titles/text, bookmarks and reading offsets. Ellipsize long directory names on one line, show the full name on hover, and keep continuation markers visible outside the ellipsis.
+
 - Text-selection actions use a compact floating toolbar beside the selection, outside the document flow. Use distinct color dots with Chinese accessible labels, a separate write-note action and a separated read action. Clicking an existing underline opens its note for recoloring, editing or removal; preserve the current theme and shared playback position. Show confirmed save feedback and keep failed input available to retry.
 
 - The Kokoro, annotations, statistics, and library organization additions must preserve the existing UI style, themes, typography, radii, icons and spacing. Reuse existing settings, sidebar, card menus and modal patterns; do not redesign the main or floating surfaces.
@@ -18,6 +20,7 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 - The React UI in this directory is the production Qt WebEngine frontend as well as the browser prototype; contract changes must update both Qt and demo transports and rebuild `dist/client`.
 - Match the supplied `key-ui` screenshots as a macOS-style desktop reading experience.
 - Content-library cards use an app-styled Chinese context menu for management actions; never expose WebEngine's generic browser menu on a book card. Label removal by its exact effect and confirm it before changing the library.
+- Reading-area context menus use Radix, existing theme variables and Phosphor icons. Offer actions for paragraphs, selected text, existing annotations and blank reading space; reuse the shared playback/bookmark/note services. Preserve the selection toolbar and editable-field native menus. Label playback as starting from the target rather than promising selection-only playback.
 - Each reading theme applies to the whole main interface: title bar, rail, directory, toolbar, reading canvas, player, library and dialogs share one neutral surface family and one accent palette. Keep only a subtle lighter reading-paper layer; do not mix blue-white chrome with green or beige reading areas.
 - The user rejected the all-green eye-protection interface. Day and eye-protection modes keep a neutral gray-white chassis and the original blue-purple brand buttons/selection accents; eye protection uses a softer neutral reading background, without recoloring the whole window or controls green.
 - Avoid redundant full-window clip-path and CSS backdrop-filter composition on the translucent desktop host. Preserve the 22px/30px antialiased border-radius with overflow clipping and the floating two-pixel inset.

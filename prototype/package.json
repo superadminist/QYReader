@@ -7,12 +7,13 @@
     "dev": "vite",
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "preview": "vite preview",
-    "test:bridge": "node --test tests/bridge.test.mjs tests/reader-features.test.mjs tests/annotation-position.test.mjs",
+    "test:bridge": "node --test tests/bridge.test.mjs tests/reader-features.test.mjs tests/annotation-position.test.mjs tests/reader-context.test.mjs",
     "test:library": "node --test tests/library-order.test.mjs tests/library-viewport.test.mjs",
     "test:sites": "node --test tests/sites-worker.test.mjs"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
+    "@radix-ui/react-context-menu": "2.4.1",
     "@vitejs/plugin-react": "5.0.4",
     "react": "19.2.0",
     "react-dom": "19.2.0",

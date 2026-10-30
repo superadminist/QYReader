@@ -47,6 +47,11 @@ function rangeAtPoint(documentObject, clientX, clientY) {
   return null;
 }
 
+export function readerPositionAtPoint(root, clientX, clientY, chapterIndex) {
+  if (!root) return null;
+  return readerPositionFromRange(root, rangeAtPoint(root.ownerDocument, clientX, clientY), chapterIndex);
+}
+
 export function readerPositionFromPointer(root, event, chapterIndex) {
   if (!root || !event || event.button !== 0) return null;
   const documentObject = root.ownerDocument;

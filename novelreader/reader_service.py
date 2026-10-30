@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import book_loader
+from .directory_titles import directory_labels
 from .library_lock import library_write_lock
 from .library_service import default_library_path
 from .storage import Storage
@@ -131,6 +132,7 @@ class ReaderService:
                 position["charOffset"],
             )
 
+        labels = directory_labels(content.chapters)
         return {
             "sessionId": session.session_id,
             "book": {
@@ -144,6 +146,7 @@ class ReaderService:
                         "index": index,
                         "title": str(chapter.title or f"第 {index + 1} 章"),
                         "charCount": len(chapter.content),
+                        **labels[index],
                     }
                     for index, chapter in enumerate(content.chapters)
                 ],

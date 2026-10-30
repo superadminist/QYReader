@@ -89,6 +89,33 @@ class ReaderServiceTests(unittest.TestCase):
         self.assertNotIn(os.fspath(source), serialized)
         self.assertNotIn("source_bak", serialized)
 
+    def test_directory_names_preserve_cache_progress_and_offsets(self):
+        chapters = [Chapter("第 1 节", "11_第10课：家庭关系\n第一段正文。"), Chapter("第 2 节", "第二段正文。")]
+        book_id, _, content = self.add_book(chapters=chapters)
+        storage = Storage(os.fspath(self.library_path))
+        storage.get_book(book_id)["progress"] = {"chapter_idx": 1, "char_offset": 3, "percent": 50}
+        storage.save()
+        cache_path = Path(storage.cache_path(book_id))
+        cached_bytes = cache_path.read_bytes()
+        bookmark = {"chapter_idx": 1, "offset": 2, "offset_end": 4, "text": "正文", "note": "保留笔记"}
+        storage.add_bookmark(book_id, bookmark)
+        saved_bookmarks = storage.get_bookmarks(book_id)
+        service = ReaderService(self.library_path)
+        opened = service.open_book(book_id)
+        self.assertEqual([item["title"] for item in opened["book"]["chapters"]], [chapter.title for chapter in chapters])
+        self.assertEqual([item["displayTitle"] for item in opened["book"]["chapters"]], ["第10课：家庭关系"] * 2)
+        self.assertEqual(opened["book"]["chapters"][1]["continuationLabel"], "（续1）")
+        self.assertEqual(opened["book"]["totalChars"], content.total_chars)
+        self.assertEqual(opened["position"]["chapterIndex"], 1)
+        self.assertEqual(opened["position"]["charOffset"], 3)
+        self.assertEqual("".join(block["text"] for block in opened["window"]["blocks"]), chapters[1].content)
+        self.assertEqual(cache_path.read_bytes(), cached_bytes)
+        self.assertEqual(Storage(os.fspath(self.library_path)).get_bookmarks(book_id), saved_bookmarks)
+        navigated = service.navigate(opened["sessionId"], {"kind": "position", "chapterIndex": 0, "charOffset": 0})
+        self.assertEqual(navigated["position"]["chapterIndex"], 0)
+        self.assertEqual(navigated["position"]["charOffset"], 0)
+        self.assertEqual("".join(block["text"] for block in navigated["window"]["blocks"]), chapters[0].content)
+
     def test_single_active_session_invalidates_the_previous_one(self):
         first_id, _, _ = self.add_book("first.txt")
         second_id, _, _ = self.add_book("second.txt")
