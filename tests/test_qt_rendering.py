@@ -16,10 +16,10 @@ class QtRenderingTests(unittest.TestCase):
         configure_rendering(environment, "win32")
         self.assertEqual(environment, before)
 
-    def test_default_windows_uses_raster_composition_without_forcing_chromium_gpu_off(self):
+    def test_default_windows_uses_hardware_acceleration(self):
         environment = {"QTWEBENGINE_CHROMIUM_FLAGS": '--custom="two words"'}
-        self.assertEqual(configure_rendering(environment, "win32"), "software-composition")
-        self.assertEqual(environment["QT_QUICK_BACKEND"], "software")
+        self.assertEqual(configure_rendering(environment, "win32"), "system")
+        self.assertNotIn("QT_QUICK_BACKEND", environment)
         self.assertEqual(environment["QTWEBENGINE_CHROMIUM_FLAGS"], '--custom="two words"')
         before = dict(environment)
         configure_rendering(environment, "win32")

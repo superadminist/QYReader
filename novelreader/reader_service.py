@@ -103,7 +103,7 @@ class ReaderService:
             metadata = payload["books"].get(safe_book_id)
             if not isinstance(metadata, dict):
                 raise ReaderServiceError("BOOK_NOT_FOUND", "内容库中不存在该书籍。")
-            storage = Storage(os.fspath(self.library_path))
+            storage = Storage(os.fspath(self.library_path), snapshot=payload)
 
         content = self._load_content(storage, safe_book_id, metadata)
         if content is None:
@@ -592,8 +592,8 @@ class ReaderService:
         if not backup:
             return
         with library_write_lock(self.library_path):
-            self._validate_library()
-            current_storage = Storage(os.fspath(self.library_path))
+            payload = self._validate_library()
+            current_storage = Storage(os.fspath(self.library_path), snapshot=payload)
             current = current_storage.get_book(book_id)
             if not isinstance(current, dict):
                 return

@@ -3,11 +3,38 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sys
+
+
+def _apply_persisted_render_mode() -> None:
+    """Apply the user's render-mode preference before Qt initializes.
+
+    Reads only the settings object from the library data file and sets
+    ``QYREADER_RENDER_MODE`` so ``configure_rendering`` can honor a software
+    fallback. Any read problem leaves the hardware-accelerated default intact.
+    """
+    if os.environ.get("QYREADER_RENDER_MODE"):
+        return  # An explicit override wins; do not overwrite it.
+    try:
+        from .paths import default_data_dir
+        path = default_data_dir() / "library.json"
+        if not path.is_file():
+            return
+        with path.open("r", encoding="utf-8") as stream:
+            payload = json.load(stream)
+        settings = payload.get("settings")
+        value = settings.get("render_mode") if isinstance(settings, dict) else None
+        if value in ("hardware", "software"):
+            os.environ["QYREADER_RENDER_MODE"] = value
+    except (OSError, ValueError, ImportError):
+        return
 
 
 def main(argv: list[str] | None = None) -> int:
     # Must precede QApplication and the first QWebEngine/QQuick surface.
+    _apply_persisted_render_mode()
     from .qt_rendering import configure_rendering
     configure_rendering()
     try:

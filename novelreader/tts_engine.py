@@ -36,10 +36,26 @@ try:
 except Exception:  # pragma: no cover
     pyttsx3 = None
 
-try:
-    import edge_tts
-except Exception:  # pragma: no cover
-    edge_tts = None
+# edge-tts pulls in aiohttp and an SSL stack (~0.3 s) on every start, and only
+# ``synth_audio`` uses it.  Import it at the first synthesis instead; the
+# sentinel keeps ``edge_tts = None`` meaning "not installed", which the SAPI
+# fallback and the regression tests rely on.
+_EDGE_TTS_UNLOADED = object()
+edge_tts = _EDGE_TTS_UNLOADED
+
+
+def _edge_tts_module():
+    """Import edge-tts once, at the first synthesis request."""
+    global edge_tts
+    if edge_tts is not _EDGE_TTS_UNLOADED:
+        return edge_tts
+    try:
+        import edge_tts as module
+    except Exception:  # pragma: no cover - optional dependency
+        module = None
+    edge_tts = module
+    return module
+
 
 import ctypes
 try:
@@ -419,14 +435,15 @@ def _sanitize_name(s):
 
 def synth_audio(text, voice, rate=200, timeout=None, boundaries=None):
     """用 Edge 神经语音把一句文本合成为 MP3 字节（独立事件循环，线程安全）。"""
-    if edge_tts is None:
+    module = _edge_tts_module()
+    if module is None:
         raise RuntimeError("edge-tts 未安装")
     rate_adj = int((max(80, min(400, int(rate))) - 200) / 2)
     buf = bytearray()
 
     async def _gen():
         options = {"boundary": "WordBoundary"} if boundaries is not None else {}
-        c = edge_tts.Communicate(text, voice, rate=f"{rate_adj:+d}%", **options)
+        c = module.Communicate(text, voice, rate=f"{rate_adj:+d}%", **options)
         async for chunk in c.stream():
             if chunk["type"] == "audio":
                 buf.extend(chunk["data"])
@@ -1100,6 +1117,7 @@ class SpeechController:
         self._applied_rate = None
         self._rate = 200
         self._volume = 100
+        self._volume_applied = None
         self._sentence_gap = 0.10
         self._backend = "sapi"
         self._edge_voice = "zh-CN-XiaoxiaoNeural"
@@ -1244,14 +1262,50 @@ class SpeechController:
             self._sentence_gap = max(0.0, float(gap))
 
     def set_volume(self, volume):
-        """设置本程序音量（0-100），即时应用到当前进程音频会话。"""
-        self._volume = max(0, min(100, int(volume)))
+        """设置本程序音量（0-100）。
+
+        同一个值重复设置没有任何效果（进程音频会话的音量会一直保持），而
+        `AudioUtilities.GetAllSessions()` 在部分机器上要 250-480ms（实测 7 个会话）。
+        这条路径在每次打开书籍、每次修改阅读设置时都会跑到，所以值没变时直接跳过。
+
+        值变化时只在**正在朗读**（playing/paused）时立即申请 OS 音量——那时用户
+        正在听，必须马上听出差别。没有在朗读时只记录期望值，等播放起点
+        `_apply_pending_volume()`（`_speak_edge_play` / `_speak_sapi` 各一次）再落地：
+        静音状态下改音量本来就没有作用对象，让界面先去等 250-480ms 的会话枚举
+        是白卡，而开书路径正是这条分支。
+        """
+        value = max(0, min(100, int(volume)))
+        with self._cv:
+            if value == self._volume_applied:
+                self._volume = value
+                return
+            self._volume = value
+            self._volume_applied = None
+            audible = self._state in ("playing", "paused")
+        if audible:
+            self._apply_volume(value)
+
+    def _apply_volume(self, value):
+        """把音量真正写到 OS；成功才记账，失败保持待应用以便下次重试。"""
         # 优先使用 Core Audio（pycaw），失败则回退 MCI
-        if not _set_process_volume(self._volume):
+        if not _set_process_volume(value):
             try:
-                _mci_set_volume(self._volume)
+                _mci_set_volume(value)
             except Exception:
-                pass
+                return False
+        with self._cv:
+            # 写入期间又改过值就一直保持待应用，别把旧值记成"已应用"。
+            if self._volume == value:
+                self._volume_applied = value
+        return True
+
+    def _apply_pending_volume(self):
+        """播放起点调用：待应用的音量（静音期改的）在这里落地，已一致则零开销。"""
+        with self._cv:
+            value = self._volume
+            if value == self._volume_applied:
+                return True
+        return self._apply_volume(value)
 
     def get_volume(self):
         return self._volume
@@ -2391,6 +2445,9 @@ class SpeechController:
             if self._engine is None:
                 raise RuntimeError("系统语音不可用")
             self._sync_props()
+            # SAPI 播放不经过 _speak_edge_play，进程音量只有这里能落地：
+            # 静音期改的音量在开口前应用一次，之后每句因已一致而零开销。
+            self._apply_pending_volume()
             driver = getattr(getattr(self._engine, "proxy", None), "_driver", None)
             stream_tracking = bool(
                 driver is not None
@@ -2922,7 +2979,7 @@ class SpeechController:
             tmp.close()
             _mci_open(tmp_path)
             _mci_set_volume(self._volume)  # MCI 层音量（回退）
-            _set_process_volume(self._volume)  # Core Audio 进程音量（主要）
+            self._apply_pending_volume()  # Core Audio 进程音量（主要）
             segment = audio if isinstance(audio, _EdgeSentenceAudio) else None
             with self._cv:
                 self._cv.wait_for(lambda: self._state != "paused" or self._should_stop(gen))
@@ -3010,18 +3067,35 @@ def _mci_set_volume(volume_0_100):
     _mci_send(f"setaudio {_MCI_ALIAS} volume to {v}")
 
 
+_PROCESS_VOLUME_CONTROL = None
+
+
 def _set_process_volume(volume_0_100):
-    """通过 Windows Core Audio 设置当前进程音量（0-100）。优先使用 pycaw。"""
+    """通过 Windows Core Audio 设置当前进程音量（0-100）。优先使用 pycaw。
+
+    枚举音频会话 `AudioUtilities.GetAllSessions()` 在部分机器上要 250-480ms，
+    而拿到本进程的 `ISimpleAudioVolume` 之后设置音量只是一次 COM 调用，所以把
+    解析到的接口缓存下来；接口失效（会话结束）时清空并重新解析。
+    """
+    global _PROCESS_VOLUME_CONTROL
     if not _HAS_PYCAW:
         return False
+    volume = max(0.0, min(1.0, volume_0_100 / 100.0))
+    control = _PROCESS_VOLUME_CONTROL
+    if control is not None:
+        try:
+            control.SetMasterVolume(volume, None)
+            return True
+        except Exception:
+            _PROCESS_VOLUME_CONTROL = None
     try:
-        volume = max(0.0, min(1.0, volume_0_100 / 100.0))
         pid = ctypes.windll.kernel32.GetCurrentProcessId()
         sessions = AudioUtilities.GetAllSessions()
         for s in sessions:
             if s.ProcessId == pid:
-                vol = s._ctl.QueryInterface(ISimpleAudioVolume)
-                vol.SetMasterVolume(volume, None)
+                resolved = s._ctl.QueryInterface(ISimpleAudioVolume)
+                resolved.SetMasterVolume(volume, None)
+                _PROCESS_VOLUME_CONTROL = resolved
                 return True
         return False
     except Exception:

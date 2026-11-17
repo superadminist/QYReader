@@ -60,21 +60,30 @@ class CornerClip(QWidget):
 class RoundedWebEngineView(QWebEngineView):
     def __init__(self, parent: QWidget, surface: str):
         super().__init__(parent)
-        self._corner_clip = CornerClip(self, surface)
-        self.loadFinished.connect(lambda _ok: self._corner_clip.refresh())
+        self._corner_clip = None
+        if surface == "floating":
+            # Only the translucent floating surface needs the software alpha
+            # guard.  The opaque main window clips its corners with a Win32
+            # region (see qt_host._apply_rounded_region) and its page is opaque,
+            # so erasing alpha there would fight the accelerated compositor.
+            self._corner_clip = CornerClip(self, surface)
+            self.loadFinished.connect(lambda _ok: self._corner_clip.refresh())
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        if hasattr(self, "_corner_clip"):
+        if self._corner_clip is not None:
             self._corner_clip.refresh()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        self._corner_clip.show()
-        self._corner_clip.refresh()
+        if self._corner_clip is not None:
+            self._corner_clip.show()
+            self._corner_clip.refresh()
 
     def childEvent(self, event) -> None:
         super().childEvent(event)
-        if event.added() and hasattr(self, "_corner_clip") and event.child() is not self._corner_clip:
+        if self._corner_clip is None:
+            return
+        if event.added() and event.child() is not self._corner_clip:
             # Navigation may recreate WebEngine's internal render child.
             QTimer.singleShot(0, self._corner_clip.refresh)

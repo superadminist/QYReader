@@ -1,11 +1,16 @@
 """Offline regression coverage for Edge admission, recovery and batch playback."""
+import subprocess
+import sys
 import threading
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from novelreader import tts_engine as tts
 from tests.test_playback_service import make_book
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class EdgeResilienceTests(unittest.TestCase):
@@ -313,6 +318,34 @@ class EdgeResilienceTests(unittest.TestCase):
         commands = [call.args[0] for call in send.call_args_list]
         self.assertIn("play dd_tts_player from 1000 to 2000", commands)
         self.assertEqual(commands[-1], "play dd_tts_player to 2000")
+
+
+class EdgeLazyImportTests(unittest.TestCase):
+    """edge-tts costs ~0.25 s of startup; it must stay unloaded until synthesis."""
+
+    def test_importing_the_engine_leaves_edge_tts_unloaded(self):
+        code = ("import sys, novelreader.tts_engine as t;"
+                "print('edge_tts' in sys.modules, t.edge_tts is t._EDGE_TTS_UNLOADED)")
+        result = subprocess.run([sys.executable, "-B", "-c", code], cwd=ROOT,
+                                capture_output=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr[-500:])
+        self.assertEqual(result.stdout.split(), ["False", "True"])
+
+    def test_loader_imports_once_and_keeps_none_meaning_unavailable(self):
+        with mock.patch.object(tts, "edge_tts", types.SimpleNamespace(Communicate=object)):
+            first = tts._edge_tts_module()
+            self.assertIs(first, tts.edge_tts)
+            self.assertIs(tts._edge_tts_module(), first)
+        with mock.patch.object(tts, "edge_tts", None):
+            self.assertIsNone(tts._edge_tts_module())
+
+    def test_synthesis_reports_missing_package_instead_of_importing_it(self):
+        with mock.patch.object(tts, "edge_tts", None), \
+                mock.patch.object(tts, "_edge_tts_module", wraps=tts._edge_tts_module) as loader:
+            with self.assertRaises(RuntimeError) as raised:
+                tts.synth_audio("文本。", "zh-CN-XiaoxiaoNeural")
+        self.assertEqual(str(raised.exception), "edge-tts 未安装")
+        loader.assert_called_once()
 
 
 if __name__ == "__main__":

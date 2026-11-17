@@ -211,6 +211,7 @@ class DesktopBridge(QObject):
                 "closeToTray": False,
                 "autoCheckUpdates": True,
                 "startupBookId": "",
+                "renderMode": "hardware",
             },
             "window": {
                 "isMaximized": bool(self._window.isMaximized()),
@@ -1918,6 +1919,11 @@ class DesktopBridge(QObject):
         self._restore_job = ""
         self._reload_data_services()
         self._maintenance = False
+        if state["status"] == "completed":
+            try:
+                self.appPreferencesChanged.emit(_json(self._app.state()))
+            except AppPreferencesError as exc:
+                self._emit_error(exc.code, exc.user_message)
         self.featuresChanged.emit(_json({"schemaVersion": SCHEMA_VERSION, "kind": "restore", "data": state}))
         self._emit_floating_state()
 

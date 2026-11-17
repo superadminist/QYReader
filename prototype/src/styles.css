@@ -1,5 +1,5 @@
 :root {
-  --main-window-radius: 22px;
+  --main-window-radius: 0px;
   --floating-window-radius: 30px;
   font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: #20232b;
@@ -160,13 +160,13 @@ h1, h2, p { margin-top: 0; }
 .book-open::before { box-shadow: 0 12px 26px rgba(45, 53, 72, .16); }
 .book-open::after { box-shadow: 0 18px 34px rgba(45, 53, 72, .22); opacity: 0; }
 .book-open .cover-wrap { z-index: 1; transition: transform .2s ease; }
-.library-page:not([data-scrolling="true"]) .book-card:hover .cover-wrap, .library-page:not([data-scrolling="true"]) .book-card:hover .book-open::before, .library-page:not([data-scrolling="true"]) .book-card:hover .book-open::after { transform: translateY(-4px); }
-.library-page:not([data-scrolling="true"]) .book-card:hover .book-open::before { opacity: 0; }
-.library-page:not([data-scrolling="true"]) .book-card:hover .book-open::after { opacity: 1; }
-/* Stop per-card hover transitions as covers pass under a stationary pointer. */
-.library-page[data-scrolling="true"] .book-open::before,
-.library-page[data-scrolling="true"] .book-open::after,
-.library-page[data-scrolling="true"] :is(.cover-wrap, .resume-pill, .book-more) { transition: none; }
+/* Hover decoration stays ungated. Gating it on a `data-scrolling` attribute put
+   the whole grid's style recalculation on every scroll start and stop (2100
+   elements, 65-72 ms per scroll case in the hidden Qt run), which cost several
+   times more than the hover transitions it avoided. */
+.book-card:hover .cover-wrap, .book-card:hover .book-open::before, .book-card:hover .book-open::after { transform: translateY(-4px); }
+.book-card:hover .book-open::before { opacity: 0; }
+.book-card:hover .book-open::after { opacity: 1; }
 .book-card.motion-ready .cover-wrap { will-change: transform; }
 .book-card.just-imported .cover-wrap { outline: 3px solid rgba(105,117,215,.44); outline-offset: 4px; }
 .cover-wrap img { width: 100%; height: 100%; display: block; object-fit: cover; }
@@ -174,7 +174,7 @@ h1, h2, p { margin-top: 0; }
 .format-badge { position: absolute; z-index: 1; top: 10px; left: 10px; padding: 4px 7px; border-radius: 6px; color: rgba(255,255,255,.92); background: rgba(25,30,42,.45); backdrop-filter: blur(7px); font-size: 9px; font-weight: 700; letter-spacing: .06em; }
 .resume-pill { position: absolute; z-index: 1; right: 10px; bottom: 10px; padding: 6px 9px; display: flex; align-items: center; gap: 5px; border-radius: 9px; color: #303542; background: rgba(255,255,255,.9); font-size: 10px; font-weight: 700; opacity: 0; transform: translateY(4px); transition: transform .18s ease, opacity .18s ease; }
 .resume-pill svg { width: 11px; }
-.library-page:not([data-scrolling="true"]) .book-card:hover .resume-pill { opacity: 1; transform: none; }
+.book-card:hover .resume-pill { opacity: 1; transform: none; }
 .book-open > strong { display: block; margin-top: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
 .book-open > small { display: block; margin-top: 5px; color: #949ba8; font-size: 11px; }
 .book-progress { width: calc(100% - 36px); height: 3px; margin-top: 10px; overflow: hidden; border-radius: 4px; background: #e0e4ea; }
@@ -182,9 +182,10 @@ h1, h2, p { margin-top: 0; }
 .book-open > em { position: absolute; right: 0; bottom: -2px; color: #939aa7; font-size: 10px; font-style: normal; }
 .book-more { position: absolute; z-index: 2; top: 10px; right: 10px; width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.65); border-radius: 9px; color: #303542; background: rgba(255,255,255,.94); box-shadow: 0 3px 12px rgba(25,30,42,.18); cursor: pointer; opacity: 0; transition: opacity .15s ease; }
 .book-more svg { width: 19px; height: 19px; }
-.library-page:not([data-scrolling="true"]) .book-card:hover .book-more, .book-card:focus-within .book-more { opacity: 1; }
+.book-card:hover .book-more, .book-card:focus-within .book-more { opacity: 1; }
 @media (hover: none) { .book-more { opacity: 1; } }
 .book-context-menu { position: fixed; z-index: 45; min-width: 185px; padding: 6px; border: 1px solid #e1e5ed; border-radius: 12px; background: #fff; box-shadow: 0 18px 42px rgba(27,34,52,.2); }
+.book-context-menu[data-open="false"] { visibility: hidden; pointer-events: none; }
 .book-context-menu button { width: 100%; padding: 10px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: 7px; color: #9b3d37; background: transparent; text-align: left; font-size: 12px; cursor: pointer; }
 .book-context-menu button:hover, .book-context-menu button:focus-visible { background: #fff0ee; }
 .book-context-menu svg { width: 17px; height: 17px; }
@@ -498,6 +499,9 @@ input.floating-progress-slider { --progress-fill: linear-gradient(to right, var(
 }
 
 .modal-backdrop { position: fixed; z-index: 50; inset: 0; padding: 20px; box-sizing: border-box; display: grid; place-items: center; background: rgba(31, 36, 49, .3); }
+/* Off-critical-path text-shaping warmup: lays the settings modal out at the exact
+   viewport geometry, then is removed; never painted or hit-tested. */
+.settings-warmup-host { position: fixed; z-index: -1; inset: 0; visibility: hidden; pointer-events: none; contain: layout style paint; }
 .paste-modal { width: min(560px, calc(100vw - 40px)); padding: 24px; border: 1px solid rgba(255,255,255,.8); border-radius: 20px; background: rgba(251,252,254,.96); box-shadow: 0 34px 90px rgba(32,38,55,.28); }
 .settings-modal { width: min(680px, calc(100vw - 40px)); height: min(560px, calc(100vh - 40px)); max-height: calc(100vh - 40px); padding: 0; display: flex; flex-direction: column; overflow: hidden; isolation: isolate; border-radius: 24px; background: #fbfcfe; }
 .settings-modal-header { flex: 0 0 auto; min-height: 72px; margin: 0; padding: 15px 18px 14px 20px; box-sizing: border-box; border-bottom: 1px solid #e5e8ee; background: #fbfcfe; }

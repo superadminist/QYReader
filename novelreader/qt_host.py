@@ -129,15 +129,17 @@ def _inject_qwebchannel_script(page: QWebEnginePage) -> None:
 
 
 def _configure_main_web_view(view: QWebEngineView, page: QWebEnginePage) -> None:
-    """Keep the page transparent for CSS and the native alpha corner guard."""
+    """Keep the main page opaque; the host window supplies the rounded clip."""
     view.setObjectName("mainWebView")
     # Qt disables the Chromium scroll animator by default. Let the browser
     # interpolate wheel ticks instead of jumping by an entire tick at once.
     # Apply before the first page load: existing scroll areas keep their animator.
     page.settings().setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True)
-    page.setBackgroundColor(QColor(0, 0, 0, 0))
-    view.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-    view.setStyleSheet("QWebEngineView#mainWebView { background: transparent; }")
+    # Opaque: the host window (not the page) owns the rounded-corner clip, so
+    # Chromium never has to composite transparent alpha over a GPU surface.
+    page.setBackgroundColor(QColor("#f7f9fc"))
+    view.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+    view.setStyleSheet("QWebEngineView#mainWebView { background: #f7f9fc; }")
 
 
 def _configure_floating_web_view(view: QWebEngineView, page: QWebEnginePage) -> None:
@@ -169,17 +171,16 @@ def _apply_window_corners(
     radius: int,
     rounded: bool,
 ) -> None:
-    # resizeEvent fires continuously while the user drags a window edge. On a
-    # translucent WebEngine top-level window, repeatedly clearing the mask and
-    # asking DWM to re-apply the same preference invalidates the compositor
-    # surface and can make the entire window disappear for a frame. Corner mode
-    # changes only when entering/leaving maximized or fullscreen state.
+    # resizeEvent fires continuously while the user drags a window edge. Corner
+    # mode changes only when entering/leaving maximized or fullscreen state.
     corner_state = (bool(rounded), int(radius))
     if getattr(window, "_dd_corner_state", None) == corner_state:
         return
     window._dd_corner_state = corner_state
-    # CSS and the native alpha guard clip at every size; never create a binary
-    # native region that becomes stale halfway through a system resize.
+    # The translucent floating surface clips its own corners through CSS and
+    # the native alpha guard; never install a binary SetWindowRgn region there
+    # (it would fight the alpha guard and leave stair-stepped edges).  Only the
+    # DWM corner preference is applied, which is a no-op on Windows 10.
     window.clearMask()
     _set_windows_corner_preference(window, rounded)
 
@@ -410,12 +411,16 @@ class DesktopWindow(_WindowRenderLifecycle, QMainWindow):
         _qa_trace("desktop-window:start")
         self.setWindowTitle("启远阅读")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
-        # Windows 10 does not honor DWMWA_WINDOW_CORNER_PREFERENCE.  Its
-        # binary QRegion mask leaves stair-stepped black triangles around a
-        # frameless window, so let the transparent WebEngine/CSS surface own
-        # the single anti-aliased clip instead.
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setStyleSheet("QMainWindow { background: transparent; }")
+        # The main window is OPAQUE.  A translucent top-level window combined
+        # with hardware acceleration loses whole content frames while the
+        # library scrolls (QtWebEngine backing-store handoff).  Rounded corners
+        # come from a Win32 region on Windows 10 and the DWM corner preference
+        # on Windows 11, both of which clip an opaque surface without that
+        # compositor handoff.  The window background matches the .mac-window
+        # card (#f7f9fc) so the clipped corners read as the card's rounded edge.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAutoFillBackground(True)
+        self.setStyleSheet("QMainWindow { background: #f7f9fc; }")
         self.setMinimumSize(960, 620)
         self._corner_timer = QTimer(self)
         self._corner_timer.setSingleShot(True)
@@ -696,5 +701,8 @@ class DesktopWindow(_WindowRenderLifecycle, QMainWindow):
         self._schedule_surface_sync()
 
     def _sync_window_corners(self) -> None:
-        rounded = not self.isMaximized() and not self.isFullScreen()
-        _apply_window_corners(self, 22, rounded)
+        # The main window is an opaque square-cornered surface.  It no longer
+        # clips a rounded region (that path produced visible stair-stepping on
+        # Windows 10 and no anti-aliasing).  Only ask DWM not to round it, so a
+        # Windows 11 host does not force its own corner on the frameless window.
+        _set_windows_corner_preference(self, False)

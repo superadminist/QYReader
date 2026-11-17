@@ -63,6 +63,29 @@ class LibraryImportServiceTests(unittest.TestCase):
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
         self.assertEqual(cache["v"], book_loader.CONTENT_CACHE_VERSION)
 
+    @unittest.skipUnless(os.name == "nt", "Windows read-handle semantics")
+    def test_paste_import_keeps_the_previous_library_when_replacement_stays_blocked(self):
+        self.assertEqual(self.import_source()[2]["succeeded"], 1)
+        before = self.library_path.read_bytes()
+        real_replace = os.replace
+        attempts = []
+
+        def observe_replace(source, target):
+            if Path(target) == self.library_path:
+                attempts.append(target)
+            return real_replace(source, target)
+
+        with self.library_path.open("rb"):
+            with patch("novelreader.storage.os.replace", side_effect=observe_replace):
+                result = self.service.import_pasted_text(
+                    "写入阻塞", "这次替换应当失败。", threading.Event(), lambda event: None,
+                )
+
+        self.assertEqual(len(attempts), 4)
+        self.assertEqual(result["succeeded"], 0)
+        self.assertEqual(result["results"][0]["error"]["code"], "LIBRARY_WRITE_FAILED")
+        self.assertEqual(self.library_path.read_bytes(), before)
+
     def test_bridge_projections_and_progress_never_expose_paths(self):
         candidates, progress, result = self.import_source()
 

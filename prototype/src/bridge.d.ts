@@ -1,5 +1,15 @@
 export const SCHEMA_VERSION: 2;
 
+export function hasDesktopHost(browserWindow?: Window): boolean;
+
+/** Optional isolated-host transport; Qt continues using QWebChannel. */
+export interface DesktopHostTransport {
+  protocolVersion: 1;
+  invoke(method: string, args: unknown[], options?: { requestId: string }): Promise<unknown>;
+  cancel?(requestId: string): Promise<void>;
+  subscribe(callback: (event: { runId: string; type: "event"; name: string; args: unknown[] }) => void): () => void;
+}
+
 export interface BridgeError {
   code: string;
   message: string;

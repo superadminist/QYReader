@@ -1,4 +1,10 @@
+import { desktopNativeProxy } from "./desktopTransport.js";
+
 export const SCHEMA_VERSION = 2;
+
+export function hasDesktopHost(browserWindow = typeof window === "undefined" ? undefined : window) {
+  return Boolean(browserWindow?.qt?.webChannelTransport || browserWindow?.__QY_DESKTOP__ || browserWindow?.__QY_DESKTOP_REQUIRED__);
+}
 
 const DEMO_BOOKS = [
   { id: "demo-1", title: "高效能人士的七个习惯", author: "", format: "EPUB", progressPercent: 36, chapterIndex: 2, chapterCount: 12, currentChapterTitle: "第 3 章 · 要事第一", lastReadAt: null, totalChars: 0, coverUrl: "covers/library-indigo.jpg" },
@@ -47,7 +53,7 @@ function demoReaderWindow(sessionId, bookId, anchorOffset = 0) {
 const EMPTY_DATA = {
   app: { version: "2.1.5" },
   library: { books: [], total: 0, sortMode: "recent" },
-  preferences: { theme: "护眼", colorScheme: "light", autoOpenLast: true, closeToTray: false, autoCheckUpdates: true, startupBookId: "" },
+  preferences: { theme: "护眼", colorScheme: "light", autoOpenLast: true, closeToTray: false, autoCheckUpdates: true, startupBookId: "", renderMode: "hardware" },
   window: { isMaximized: false, isFullScreen: false },
   speech: {
     settings: { ttsRate: 200, ttsVoiceId: "", sentenceGapSeconds: 0.1 },
@@ -156,7 +162,8 @@ function validAppPreferences(preferences) {
     && typeof preferences.autoOpenLast === "boolean"
     && typeof preferences.closeToTray === "boolean"
     && typeof preferences.autoCheckUpdates === "boolean"
-    && typeof preferences.startupBookId === "string",
+    && typeof preferences.startupBookId === "string"
+    && ["hardware", "software"].includes(preferences.renderMode),
   );
 }
 
@@ -722,7 +729,8 @@ function invokeWithResult(nativeBridge, method, args = []) {
       return;
     }
     try {
-      nativeBridge[method](...args, (result) => resolve(result));
+      const pending = nativeBridge[method](...args, (result) => resolve(result));
+      pending?.catch?.(reject);
     } catch {
       reject(new BridgeProtocolError("桌面通信调用失败。", "BRIDGE_CALL_FAILED"));
     }
@@ -991,6 +999,7 @@ function nativeApp(nativeBridge) {
           || (field === "autoOpenLast" && typeof value === "boolean")
           || (field === "closeToTray" && typeof value === "boolean")
           || (field === "autoCheckUpdates" && typeof value === "boolean")
+          || (field === "renderMode" && ["hardware", "software"].includes(value))
         ));
       if (!validPatch) throw new BridgeProtocolError("应用设置参数无效。", "BRIDGE_INVALID_ARGUMENT");
       return parseBridgeResponse(
@@ -1615,6 +1624,24 @@ function createDemoConnection() {
 export async function connectBridge(environment = {}) {
   const browserWindow = environment.window ?? (typeof window === "undefined" ? undefined : window);
   const browserDocument = environment.document ?? (typeof document === "undefined" ? undefined : document);
+
+  if (browserWindow?.__QY_DESKTOP__) {
+    const nativeBridge = await desktopNativeProxy(browserWindow.__QY_DESKTOP__);
+    try {
+      const initialState = parseInitialState(await invokeWithResult(nativeBridge, "getInitialState"));
+      const connection = createNativeConnection(nativeBridge, initialState);
+      const dispose = connection.dispose;
+      connection.dispose = () => { dispose(); nativeBridge.disposeTransport(); };
+      return connection;
+    } catch (error) {
+      nativeBridge.disposeTransport();
+      throw error;
+    }
+  }
+
+  if (browserWindow?.__QY_DESKTOP_REQUIRED__ && !browserWindow?.qt?.webChannelTransport) {
+    throw new BridgeProtocolError("桌面服务未连接，请重新启动应用。", "DESKTOP_TRANSPORT_MISSING");
+  }
 
   if (!browserWindow?.qt?.webChannelTransport) {
     return createDemoConnection();

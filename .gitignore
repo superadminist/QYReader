@@ -61,6 +61,16 @@ downloads/
 # 测试样书（大文件不进仓库）
 /sample/*.pdf
 
+# 桌面渲染重构的测试数据、诊断工具与独立工程（不进产品仓库）
+/my-doc/
+/desktop-lab/
+/website/
+/restructured/
+/run-restructured.bat
+
+# WorkBuddy 项目记忆（本机 agent 工作数据，非产品代码）
+/.workbuddy/
+
 # 备份文件
 *.bak
 # 根目录临时截图

@@ -58,6 +58,8 @@ class AppPreferencesService:
         )
         last_book = str(settings.get("last_book") or "")
         startup_book = last_book if auto_open and last_book in books else ""
+        render_mode = settings.get("render_mode", DEFAULT_SETTINGS["render_mode"])
+        render_mode = render_mode if render_mode in ("hardware", "software") else DEFAULT_SETTINGS["render_mode"]
         return {
             "theme": theme,
             "colorScheme": "dark" if theme == "夜间" else "light",
@@ -65,13 +67,14 @@ class AppPreferencesService:
             "closeToTray": close_to_tray,
             "autoCheckUpdates": auto_check_updates,
             "startupBookId": startup_book,
+            "renderMode": render_mode,
         }
 
     def update(self, patch: dict[str, Any]) -> dict[str, Any]:
         if (
             not isinstance(patch, dict)
             or not patch
-            or set(patch) - {"theme", "autoOpenLast", "closeToTray", "autoCheckUpdates"}
+            or set(patch) - {"theme", "autoOpenLast", "closeToTray", "autoCheckUpdates", "renderMode"}
         ):
             raise AppPreferencesError("INVALID_REQUEST", "应用设置参数不正确。")
         updates: dict[str, Any] = {}
@@ -95,6 +98,11 @@ class AppPreferencesService:
             if not isinstance(auto_check_updates, bool):
                 raise AppPreferencesError("INVALID_REQUEST", "自动检查更新设置不正确。")
             updates["auto_check_updates"] = auto_check_updates
+        if "renderMode" in patch:
+            render_mode = patch["renderMode"]
+            if render_mode not in ("hardware", "software"):
+                raise AppPreferencesError("INVALID_REQUEST", "渲染模式设置不正确。")
+            updates["render_mode"] = render_mode
 
         with library_write_lock(self.library_path):
             payload = self._load()

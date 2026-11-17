@@ -10,7 +10,6 @@ import {
   CornersOut,
   Crosshair,
   FileArrowUp,
-  FolderOpen,
   GearSix,
   Headphones,
   LinkSimple,
@@ -30,11 +29,12 @@ import {
   WifiHigh,
   X,
 } from "@phosphor-icons/react";
-import { connectBridge } from "./bridge.js";
+import { connectBridge, hasDesktopHost } from "./bridge.js";
 import { ActivityReporter, BookOrganizer, KokoroPanel, NOTE_COLORS, NoteEditor, ShelfFilters, StatisticsView } from "./ReaderFeatures.jsx";
 import { readerSelectionFromRange } from "./readerPosition.js";
 import BatchLibraryControls, { toggleLibrarySelection } from "./BatchLibraryControls.jsx";
 import LibraryBookCard from "./LibraryBookCard.jsx";
+import BookContextMenu from "./BookContextMenu.jsx";
 import BackupPanel from "./BackupPanel.jsx";
 import OfflineCachePanel from "./OfflineCachePanel.jsx";
 import VoiceCenter from "./VoiceCenter.jsx";
@@ -72,6 +72,7 @@ const DEFAULT_APP_PREFERENCES = {
   closeToTray: false,
   autoCheckUpdates: true,
   startupBookId: "",
+  renderMode: "hardware",
 };
 
 const DEFAULT_SOFTWARE_UPDATE = {
@@ -376,7 +377,7 @@ const Library = memo(function Library({
     if (features) features.invoke({ action: "organizationState" }).then((r) => setTaxonomy(r.data)).catch((e) => setActionError(e.message));
   }, [features]);
   useEffect(refreshTerms, [refreshTerms]);
-  const [bookMenu, setBookMenu] = useState(null);
+  const bookMenuRef = useRef(null);
   const [bookToRemove, setBookToRemove] = useState(null);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState("");
@@ -392,7 +393,11 @@ const Library = memo(function Library({
   const suppressOpenRef = useRef(false);
   const previousRectsRef = useRef(new Map());
   const [gridViewport, setGridViewport] = useState({ columns: 4, rowHeight: 400, top: 0, height: 800 });
-  const virtualLibrary = sortMode !== "manual" && books.length > 512;
+  // The mounted window is ~64-96 cards, so 200 books is already two and a half
+  // windows: below that the window saves little and only adds mount churn. At
+  // 300 books it cut scroll task time by 38-56% offline (hit testing 63-74%),
+  // with frame p95 unchanged and no long task across three batch boundaries.
+  const virtualLibrary = sortMode !== "manual" && books.length > 200;
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const orderedBooks = draftBooks || books;
   const visibleBooks = useMemo(() => orderedBooks.filter((book) => (!normalizedQuery || book.title.toLocaleLowerCase().includes(normalizedQuery))
@@ -418,8 +423,10 @@ const Library = memo(function Library({
     };
     const markScrolling = (event) => {
       if (event.type === "wheel" && (event.ctrlKey || !event.deltaY)) return;
-      // A stationary pointer crosses many cards during scrolling. Freeze only
-      // their hover decoration, without blocking clicks or native scrolling.
+      // Publish the scroll state for the desktop checks. No style depends on it:
+      // gating hover decoration on an ancestor attribute restyled the whole grid
+      // on every flip (measured 65-72 ms of style work per scroll case), which
+      // cost far more than the hover transitions it suppressed.
       if (!scrolling) {
         scrolling = true;
         page.dataset.scrolling = "true";
@@ -440,11 +447,23 @@ const Library = memo(function Library({
     if (typeof IntersectionObserver === "undefined") return;
     const cards = gridRef.current?.querySelectorAll(".book-card") || [];
     const visible = new Set();
+    const warmed = new Set();
     let timer;
     const warm = () => {
       // Never rebuild layers during a scroll gesture. Only retain the expensive
       // cover image while the viewport is settled; shadows/buttons stay automatic.
-      for (const card of cards) card.classList.toggle("motion-ready", visible.has(card));
+      for (const card of warmed) {
+        if (!visible.has(card)) {
+          card.classList.remove("motion-ready");
+          warmed.delete(card);
+        }
+      }
+      for (const card of visible) {
+        if (!warmed.has(card)) {
+          card.classList.add("motion-ready");
+          warmed.add(card);
+        }
+      }
     };
     const schedule = () => { clearTimeout(timer); timer = setTimeout(warm, 180); };
     const observer = new IntersectionObserver(entries => {
@@ -461,7 +480,7 @@ const Library = memo(function Library({
       clearTimeout(timer);
       observer.disconnect();
       page.removeEventListener("scroll", schedule);
-      for (const card of cards) card.classList.remove("motion-ready");
+      for (const card of warmed) card.classList.remove("motion-ready");
     };
   }, [visibleBooks, firstRow, endRow]);
   useLayoutEffect(() => {
@@ -500,21 +519,31 @@ const Library = memo(function Library({
     // the page. Do not observe grid height: virtual padding changes on scroll.
     const observedHeaders = new Set();
     const observeHeaders = () => {
+      const headers = new Set();
+      for (let child = grid.previousElementSibling; child; child = child.previousElementSibling) {
+        headers.add(child);
+      }
+      let changed = false;
       for (const child of observedHeaders) {
-        if (child.parentElement !== page) {
+        if (!headers.has(child)) {
           observer.unobserve(child);
           observedHeaders.delete(child);
+          changed = true;
         }
       }
-      for (const child of page.children) {
-        if (child !== grid && !observedHeaders.has(child)) {
+      for (const child of headers) {
+        if (!observedHeaders.has(child)) {
           observer.observe(child);
           observedHeaders.add(child);
+          changed = true;
         }
       }
+      return changed;
     };
     observeHeaders();
-    const contentObserver = new MutationObserver(() => { observeHeaders(); scheduleMeasure(); });
+    const contentObserver = new MutationObserver(() => {
+      if (observeHeaders()) scheduleMeasure();
+    });
     contentObserver.observe(page, { childList: true });
     page.addEventListener("scroll", scheduleScroll, { passive: true });
     measure();
@@ -603,7 +632,7 @@ const Library = memo(function Library({
       gesture.active = true;
       gesture.element.setPointerCapture(event.pointerId);
       suppressOpenRef.current = true;
-      setBookMenu(null);
+      bookMenuRef.current.close();
       setDraggedId(gesture.id);
       setDragPreview({ book: gesture.book, width: gesture.bounds.width, x: gesture.startX - gesture.offsetX, y: gesture.startY - gesture.offsetY });
       setDraftBooks(gesture.books);
@@ -639,21 +668,13 @@ const Library = memo(function Library({
     try { await setSortMode(mode); } catch (error) { setActionError(error.message || "无法切换排序方式。"); }
     finally { setSortPending(false); }
   };
-  useEffect(() => {
-    if (!bookMenu) return undefined;
-    const closeMenu = () => setBookMenu(null);
-    const onKeyDown = (event) => { if (event.key === "Escape") closeMenu(); };
-    window.addEventListener("pointerdown", closeMenu);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", closeMenu);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [bookMenu]);
-  const showBookMenu = (event, book) => {
-    event.preventDefault();
-    event.stopPropagation();
-    setBookMenu({ book, x: Math.min(event.clientX, window.innerWidth - 230), y: Math.min(event.clientY, window.innerHeight - 122) });
+  const revealBookSource = async (book) => {
+    setActionError("");
+    try {
+      await revealSource(book.id);
+    } catch (error) {
+      setActionError(error.message || "无法打开源文件位置。");
+    }
   };
   const confirmRemove = async () => {
     if (!bookToRemove || removing) return;
@@ -666,7 +687,7 @@ const Library = memo(function Library({
   };
   const importing = ["selecting", "confirming", "processing", "cancelling"].includes(importState.status);
   const cardActions = useStableActions({
-    showMenu: showBookMenu,
+    showMenu: (event, book) => bookMenuRef.current.show(event, book),
     startDrag,
     moveDrag,
     finishDrag,
@@ -718,7 +739,12 @@ const Library = memo(function Library({
       </div>
       {dragPreview ? <div ref={dragPreviewRef} className="book-drag-preview" aria-hidden="true" style={{ width: dragPreview.width, transform: `translate(${dragPreview.x}px, ${dragPreview.y}px) scale(1.035)` }}><div className="cover-wrap"><img src={dragPreview.book.coverUrl} alt="" draggable={false} /></div><strong>{dragPreview.book.title}</strong></div> : null}
       {organizingBook ? <BookOrganizer book={organizingBook} taxonomy={taxonomy} features={features} onUpdated={() => { refreshTerms(); onReload(); }} onClose={() => setOrganizingBook(null)} /> : null}
-      {bookMenu ? <div className="book-context-menu" role="menu" style={{ left: Math.max(8, bookMenu.x), top: Math.max(8, bookMenu.y) }} onPointerDown={(event) => event.stopPropagation()}><button role="menuitem" onClick={() => { setOrganizingBook(bookMenu.book); setBookMenu(null); }}>分类、标签与阅读状态</button><button role="menuitem" disabled={!bookMenu.book.canRevealSource} title={bookMenu.book.canRevealSource ? "在文件资源管理器中选中原文件" : "此内容没有可定位的源文件"} onClick={async () => { const book = bookMenu.book; setBookMenu(null); setActionError(""); try { await revealSource(book.id); } catch (error) { setActionError(error.message || "无法打开源文件位置。"); } }}><FolderOpen /> 打开源文件位置</button><div className="menu-separator" role="separator" /><button className="destructive" role="menuitem" onClick={() => { setBookToRemove(bookMenu.book); setRemoveError(""); setBookMenu(null); }}><Trash /> 从内容库移除</button></div> : null}
+      <BookContextMenu
+        ref={bookMenuRef}
+        onOrganize={setOrganizingBook}
+        onReveal={revealBookSource}
+        onRemove={(book) => { setBookToRemove(book); setRemoveError(""); }}
+      />
       {bookToRemove ? <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !removing && setBookToRemove(null)}><div className="paste-modal remove-book-modal" role="alertdialog" aria-modal="true" aria-labelledby="remove-book-title" aria-describedby="remove-book-detail"><div className="modal-header"><div><span className="modal-icon remove"><Trash /></span><div><h2 id="remove-book-title">移出内容库？</h2><p id="remove-book-detail">“{bookToRemove.title}”将从内容库移除，阅读进度也会移除。原文件和应用缓存会保留。</p></div></div></div>{removeError ? <p className="modal-error" role="alert">{removeError}</p> : null}<div className="remove-book-actions"><button className="secondary-button" disabled={removing} onClick={() => setBookToRemove(null)}>取消</button><button className="remove-book-confirm" disabled={removing} onClick={confirmRemove}>{removing ? "正在移除…" : "确认移除"}</button></div></div></div> : null}
     </section>
   );
@@ -1764,6 +1790,10 @@ function SettingsModal({ preferences, speech, floatingSettings, version, softwar
               <label className="confirmation-row"><input type="checkbox" checked={preferences.autoOpenLast} disabled={isPending("app", "autoOpenLast")} onChange={(event) => onUpdateApp({ autoOpenLast: event.target.checked })} />启动时自动打开上次阅读内容</label>
               <label className="confirmation-row"><input type="checkbox" checked={preferences.closeToTray} disabled={isPending("app", "closeToTray")} onChange={(event) => onUpdateApp({ closeToTray: event.target.checked })} />点击关闭按钮时最小化到系统托盘（关闭此开关则退出程序）</label>
             </section>
+            <section className="settings-section"><h3>渲染模式</h3>
+              <div className="theme-options compact">{[["hardware", "流畅优先"], ["software", "稳定优先"]].map(([value, label]) => <button key={value} className={preferences.renderMode === value ? "selected" : ""} disabled={isPending("app", "renderMode")} onClick={() => onUpdateApp({ renderMode: value })}>{label}</button>)}</div>
+              <p className="settings-hint inline">流畅优先使用硬件加速，动画更顺滑；若出现画面闪白等异常，可切换为稳定优先。切换后重启应用生效。</p>
+            </section>
             <section className="settings-section"><h3>缓存与数据</h3><p>书架、正文缓存、源文件备份与语音缓存保存在 QYReader 本地数据目录；应用不会上传阅读内容。</p></section>
           </> : null}
           {activeTab === "reading" ? <>
@@ -1830,13 +1860,27 @@ function UpdateAvailableModal({ update, onDownload, onSkip, onOpenRelease, onClo
   );
 }
 
+// Opening settings does not change the reader; keep its rendered tree in place.
+const MemoizedNativeReader = memo(NativeReader);
+
+// The first settings open pays a one-time text-shaping layout (~35 ms with the 300-card
+// library mounted); one prior layout drops it to ~2 ms. Warm those two static tabs while
+// the renderer is idle so the cost lands before the click instead of inside it. Tabs that
+// load data on mount (voices, offline, backup) are deliberately excluded.
+//
+// The reader tree was tried the same way (2026-11-16) and reverted: the host measures
+// only 7-8 ms of layout on the first open, so warming it bought nothing measurable there
+// while costing a 79 ms idle task.
+let settingsShapeWarmed = false;
+const noop = () => {};
+
 function MainApplication() {
   const qaMode = new URLSearchParams(window.location.search).get("qa");
   const qaFloating = qaMode === "floating";
   const qaNetwork = qaMode === "network";
   const qaUpdate = qaMode === "update";
   const qaEmptyLibrary = qaMode === "empty-library";
-  const nativeTransportAvailable = Boolean(window.qt?.webChannelTransport);
+  const nativeTransportAvailable = hasDesktopHost(window);
   const demoQaFloating = qaFloating && !nativeTransportAvailable;
   const connectionRef = useRef(null);
   const [page, setPage] = useState(demoQaFloating || qaNetwork ? "reader" : "library");
@@ -1866,6 +1910,7 @@ function MainApplication() {
   const [updatePromptVersion, setUpdatePromptVersion] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState("reading");
+  const [settingsWarmMount, setSettingsWarmMount] = useState(false);
   const [networkNotice, handlePlaybackEvent] = usePlaybackNetworkNotice(qaNetwork ? NETWORK_FALLBACK_NOTICE : null);
   const settingsPendingRef = useRef(new Set());
   const [settingsPending, setSettingsPending] = useState([]);
@@ -1887,13 +1932,6 @@ function MainApplication() {
 
   useEffect(() => {
     let active = true;
-    const readBridgeMessage = (raw) => {
-      try {
-        return JSON.parse(raw).message || "桌面操作失败。";
-      } catch {
-        return "桌面操作失败。";
-      }
-    };
     const attachConnection = (connected) => {
       if (!active) {
         connected.dispose();
@@ -1926,7 +1964,18 @@ function MainApplication() {
         });
       }
       connected.onBridgeError((raw) => {
-        if (active) setBridgeError(readBridgeMessage(raw));
+        if (!active) return;
+        let failure;
+        try { failure = JSON.parse(raw); } catch { /* Older transport errors may be plain text. */ }
+        const message = failure?.message || "桌面操作失败。";
+        setBridgeError(message);
+        if (failure?.code === "SERVICE_DISCONNECTED") {
+          readerOpenRequestRef.current = "";
+          readerSessionRef.current = "";
+          readerDataRef.current = null;
+          readerWindowRequestRef.current += 1;
+          dispatchReader({ type: "FAILED", error: message });
+        }
       });
       connected.onAppPreferencesChanged((preferences) => {
         if (active) setAppPreferences(preferences);
@@ -2632,6 +2681,22 @@ function MainApplication() {
     ? { fileImport: true, pasteImport: true, webImport: true, audioImport: true }
     : capabilities, [bridgeMode, capabilities]);
   const reloadLibraryFeatures = async () => { const connection = connectionRef.current; if (!connection) return; const r = await connection.library.getState(); setBooks(r.data.books); setLibrarySortMode(r.data.sortMode); };
+  const nativeReaderActions = useStableActions({
+    onChooseStart: chooseReaderStart,
+    onBack: () => setPage("library"),
+    onNavigate: navigateReader,
+    onGetWindow: getReaderWindow,
+    onUpdatePosition: updateReaderPosition,
+    onSearch: searchReader,
+    onLoadBookmarks: loadReaderBookmarks,
+    onAddBookmark: addReaderBookmark,
+    onRemoveBookmark: removeReaderBookmark,
+    onBookmarkSaved: (bookmark) => dispatchReader({ type: "BOOKMARK_SAVED", bookmark }),
+    onCommand: controlReaderPlayback,
+    onSettings: updateReaderSettings,
+    onFloatingToggle: switchToFloatingReader,
+    onOpenSettings: (tab = "reading") => { setSettingsInitialTab(tab); setSettingsOpen(true); },
+  });
   const libraryActions = useStableActions({ setSortMode: setLibrarySort, moveBook: moveLibraryItem, revealSource, openBook, removeBook, openPaste: () => setPasteOpen(true), openWeb: () => setWebOpen(true), selectFiles, showUnavailable, cancelImport, onReload: () => reloadLibraryFeatures().catch((e) => setBridgeError(e.message)) });
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -2663,6 +2728,32 @@ function MainApplication() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [readerState, windowControls, nativeFloatingState]);
+  useEffect(() => {
+    if (settingsShapeWarmed || libraryLoading) return undefined;
+    let cancelled = false, idleHandle = 0, timer = 0, first = 0, second = 0;
+    const warm = () => {
+      if (cancelled || settingsShapeWarmed) return;
+      settingsShapeWarmed = true;
+      setSettingsWarmMount(true);
+      first = requestAnimationFrame(() => { second = requestAnimationFrame(() => { if (!cancelled) setSettingsWarmMount(false); }); });
+    };
+    const schedule = () => {
+      if (typeof window.requestIdleCallback === "function") idleHandle = window.requestIdleCallback(warm, { timeout: 2500 });
+      else timer = window.setTimeout(warm, 600);
+    };
+    // Gate on the library having rendered; otherwise the warmup would land inside startup.
+    timer = window.setTimeout(schedule, 300);
+    return () => {
+      cancelled = true;
+      if (idleHandle) window.cancelIdleCallback?.(idleHandle);
+      clearTimeout(timer);
+      cancelAnimationFrame(first);
+      cancelAnimationFrame(second);
+    };
+  }, [libraryLoading]);
+  const settingsModalElement = (initialTab, onClose) => (
+    <SettingsModal initialTab={initialTab} readerData={readerState.phase === "ready" ? readerState.data : null} features={connectionRef.current?.features} preferences={appPreferences} speech={speechState} floatingSettings={nativeFloatingState?.settings || EMPTY_FLOATING_STATE.settings} version={appVersion} softwareUpdate={softwareUpdate} pending={settingsPending} onUpdateApp={updateAppPreferences} onUpdateSpeech={updateSpeechPreferences} onUpdateFloating={updateFloatingPreferences} onCheckUpdate={checkForUpdates} onDownloadUpdate={downloadUpdate} onSkipUpdate={skipUpdate} onInstallUpdate={installUpdate} onOpenUpdatePage={openUpdatePage} onClose={onClose} />
+  );
   return (
     <div className={`prototype-stage ${desktopMode ? "desktop-host" : ""} ${floating && bridgeMode === "demo" ? "demo-floating-active" : ""} theme-${appPreferences.colorScheme}`} data-theme={appPreferences.theme} data-resizing={windowInteractionActive ? "true" : "false"} data-window-mode={windowState.isFullScreen ? "fullscreen" : windowState.isMaximized ? "maximized" : "normal"} onContextMenu={(event) => { if (!event.target.closest("input, textarea, [contenteditable=true]")) event.preventDefault(); }}>
       {desktopMode ? <WindowResizeHandles controls={windowControls} /> : null}
@@ -2675,7 +2766,7 @@ function MainApplication() {
             {page === "statistics" ? <StatisticsView features={connectionRef.current?.features} /> : page === "reader" && bridgeMode === "demo"
               ? <DemoReader setPage={setPage} fontSize={fontSize} setFontSize={setFontSize} playing={playing} setPlaying={setPlaying} floating={floating} setFloating={setFloating} networkNotice={networkNotice} />
               : page === "reader" && bridgeMode === "native"
-                ? <NativeReader voiceOptions={speechState.voices} features={connectionRef.current?.features} state={readerState} networkNotice={networkNotice} selectedStart={selectedReaderStart} onChooseStart={chooseReaderStart} onBack={() => setPage("library")} onNavigate={navigateReader} onGetWindow={getReaderWindow} onUpdatePosition={updateReaderPosition} onSearch={searchReader} onLoadBookmarks={loadReaderBookmarks} onAddBookmark={addReaderBookmark} onRemoveBookmark={removeReaderBookmark} onBookmarkSaved={(bookmark) => dispatchReader({ type: "BOOKMARK_SAVED", bookmark })} onCommand={controlReaderPlayback} onSettings={updateReaderSettings} floatingAvailable={capabilities.floatingReader} floatingVisible={Boolean(nativeFloatingState?.visible)} onFloatingToggle={switchToFloatingReader} onOpenSettings={(tab = "reading") => { setSettingsInitialTab(tab); setSettingsOpen(true); }} />
+                ? <MemoizedNativeReader {...nativeReaderActions} voiceOptions={speechState.voices} features={connectionRef.current?.features} state={readerState} networkNotice={networkNotice} selectedStart={selectedReaderStart} floatingAvailable={capabilities.floatingReader} floatingVisible={Boolean(nativeFloatingState?.visible)} />
                 : <Library features={connectionRef.current?.features} {...libraryActions} books={books} sortMode={librarySortMode} error={bridgeError} loading={libraryLoading} capabilities={effectiveCapabilities} readerEnabled={readerEnabled} importState={importState} openAfterImportBookId={openAfterImportBookId} />}
           </main>
         </div>
@@ -2684,7 +2775,8 @@ function MainApplication() {
       {pasteOpen && <PasteModal onClose={() => setPasteOpen(false)} onImport={startPasteImport} demoMode={bridgeMode === "demo"} />}
       {webOpen && <WebImportModal onClose={() => setWebOpen(false)} onImport={startWebImport} />}
       {importSelection && <ImportConfirmationModal selection={importSelection} onClose={() => { setImportSelection(null); setImportState({ ...EMPTY_IMPORT_STATE }); }} onStart={startFileImport} />}
-      {settingsOpen && <SettingsModal initialTab={settingsInitialTab} readerData={readerState.phase === "ready" ? readerState.data : null} features={connectionRef.current?.features} preferences={appPreferences} speech={speechState} floatingSettings={nativeFloatingState?.settings || EMPTY_FLOATING_STATE.settings} version={appVersion} softwareUpdate={softwareUpdate} pending={settingsPending} onUpdateApp={updateAppPreferences} onUpdateSpeech={updateSpeechPreferences} onUpdateFloating={updateFloatingPreferences} onCheckUpdate={checkForUpdates} onDownloadUpdate={downloadUpdate} onSkipUpdate={skipUpdate} onInstallUpdate={installUpdate} onOpenUpdatePage={openUpdatePage} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen ? settingsModalElement(settingsInitialTab, () => setSettingsOpen(false)) : null}
+      {settingsWarmMount && !settingsOpen ? <div className="settings-warmup-host" aria-hidden="true">{settingsModalElement("reading", noop)}{settingsModalElement("general", noop)}</div> : null}
       {updatePromptVersion && softwareUpdate.latestVersion === updatePromptVersion ? <UpdateAvailableModal update={softwareUpdate} onDownload={downloadUpdate} onSkip={skipUpdate} onOpenRelease={() => openUpdatePage("release")} onClose={dismissUpdatePrompt} /> : null}
     </div>
   );

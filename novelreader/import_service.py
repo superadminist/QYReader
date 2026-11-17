@@ -436,7 +436,7 @@ class LibraryImportService:
                                    if key not in {"progress", "added_at", "last_read_at"}})
                     metadata = merged
                 backup_library(self.library_path)
-                current_storage.add_book(metadata)
+                current_storage.add_book(metadata, retry_replace=True)
             except Exception as exc:
                 raise ImportServiceError(
                     "LIBRARY_WRITE_FAILED",

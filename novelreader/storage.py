@@ -127,14 +127,20 @@ DEFAULT_SETTINGS = {
     "library_sort_mode": "recent",
     "library_manual_order": [],
     "last_import_dir": "",
+    "render_mode": "hardware",  # 渲染模式：hardware 流畅优先 / software 稳定优先（重启生效）
 }
 
 
 class Storage:
-    def __init__(self, path=None):
+    def __init__(self, path=None, *, snapshot=None):
         self.path = path or os.path.join(data_dir(), "library.json")
         self.data = {"books": {}, "settings": dict(DEFAULT_SETTINGS)}
-        self.load()
+        if snapshot is None:
+            self.load()
+        else:
+            # The caller already read and validated this snapshot under the library lock.
+            self.data = dict(snapshot)
+            self._apply_defaults()
 
     # ---------- 基础读写 ----------
     def load(self):
@@ -146,16 +152,30 @@ class Storage:
                     self.data = loaded
             except Exception:
                 self.data = {"books": {}, "settings": dict(DEFAULT_SETTINGS)}
+        self._apply_defaults()
+
+    def _apply_defaults(self):
         self.data.setdefault("books", {})
         self.data.setdefault("settings", {})
         s = dict(DEFAULT_SETTINGS)
         s.update(self.data["settings"])
         self.data["settings"] = s
 
-    def save(self):
+    def save(self, *, retry_replace=False):
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self.data, f, ensure_ascii=False, indent=1)
+        # The import worker can briefly collide with an open Windows read
+        # handle. Retry only the atomic replacement of the same snapshot.
+        delays = (0.02, 0.04, 0.06) if retry_replace else ()
+        for delay in delays:
+            try:
+                os.replace(tmp, self.path)
+                return
+            except PermissionError as exc:
+                if getattr(exc, "winerror", None) not in (5, 32, 33):
+                    raise
+                time.sleep(delay)
         os.replace(tmp, self.path)
 
     # ---------- 设置 ----------
@@ -175,9 +195,9 @@ class Storage:
         key = os.path.normcase(os.path.abspath(path))
         return hashlib.md5(key.encode("utf-8")).hexdigest()[:16]
 
-    def add_book(self, meta):
+    def add_book(self, meta, *, retry_replace=False):
         self.data["books"][meta["id"]] = meta
-        self.save()
+        self.save(retry_replace=retry_replace)
         return meta["id"]
 
     def get_book(self, bid):
