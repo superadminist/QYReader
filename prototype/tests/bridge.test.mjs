@@ -820,9 +820,9 @@ test("software update state carries bounded user-readable release notes", () => 
   assert.equal(typeof state.publishedAt, "string");
 });
 
-test("native window surfaces let the transparent CSS clip paint the main corners", async () => {
+test("native window surfaces keep the main window square while the floating surface keeps rounded corners", async () => {
   const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
-  assert.match(css, /--main-window-radius: 22px;/);
+  assert.match(css, /--main-window-radius: 0px;/);
   assert.match(css, /--floating-window-radius: 30px;/);
   assert.match(css, /\.desktop-host \.mac-window \{[^}]*width: 100vw;[^}]*height: 100vh;[^}]*margin: 0;[^}]*border-radius: var\(--main-window-radius\);/s);
   assert.match(css, /\.desktop-host\[data-window-mode="maximized"\] \.mac-window,[\s\S]*border-radius: 0;/);
