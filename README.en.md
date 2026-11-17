@@ -44,7 +44,9 @@ These macOS-inspired UI concepts put the software first, with neutral gray backg
 
 ## Current features
 
-### v2.2.3 · 2026-10-30
+### v2.2.4 · 2026-11-17
+
+- Hardware-accelerated rendering by default restores smooth library scrolling; the main window is now opaque, fixing full-window flicker during scroll. Software compositing remains available in settings.
 
 - Reader context menus provide reading, bookmarks, copying, highlights, notes, and navigation shortcuts.
 - Smarter directory labels with ellipsis and visible continuation markers; fix the blank reader settings panel while preserving chapters and progress.
@@ -86,6 +88,7 @@ Chapter preparation and cache management are available in the 2.x interface. Exi
 
 | Version | Main changes |
 | --- | --- |
+| [v2.2.4](release-notes/v2.2.4.md) | Hardware-accelerated rendering restores smooth scrolling; opaque main window fixes scroll flicker; hardened concurrent writes. |
 | [v2.2.3](release-notes/v2.2.3.md) | Smarter directory labels with ellipsis and visible continuation markers; fix the blank reader settings panel while preserving chapters and progress. |
 | [v2.2.2](release-notes/v2.2.2.md) | Avoids re-rendering retained book cards and caches filter/selection data while preserving composition compatibility and existing library behavior. |
 | [v2.2.1](release-notes/v2.2.1.md) | Improves wheel interpolation, scrolling animation cost, and large-library layout work; fixes filtered-list bounds and documents the remaining desktop performance limits. |
@@ -250,7 +253,7 @@ For manual packaging, build the frontend, install packaging dependencies, and ru
 .venv\Scripts\python.exe -m PyInstaller --clean --noconfirm "QYReader.spec"
 ```
 
-The current version's installer path is `dist\installer\QYReader-Setup-2.2.3.exe`. The installer lets you choose the location and whether to create a desktop shortcut. It defaults to `Program Files\QYReader` and requests administrator privileges when launched. Before release, validate installation, first-launch data migration, upgrading, and data retention after uninstalling. Check WebEngine resources, importing/reading, exit cleanup, and the absence of Node, Vite development servers, or an external Python interpreter in the process tree. A successful build alone does not establish desktop validation.
+The current version's installer path is `dist\installer\QYReader-Setup-2.2.4.exe`. The installer lets you choose the location and whether to create a desktop shortcut. It defaults to `Program Files\QYReader` and requests administrator privileges when launched. Before release, validate installation, first-launch data migration, upgrading, and data retention after uninstalling. Check WebEngine resources, importing/reading, exit cleanup, and the absence of Node, Vite development servers, or an external Python interpreter in the process tree. A successful build alone does not establish desktop validation.
 
 Pushing to `main` triggers the GitHub Actions `Windows installer` workflow, which runs tests and packaging on a Windows runner. The installer and `SHA256SUMS.txt` are retained as build artifacts for 30 days. You can also trigger the workflow manually from GitHub Actions. Generated binaries are not committed to Git.
 
