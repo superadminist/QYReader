@@ -245,12 +245,15 @@ class Stage4FloatingServiceTests(unittest.TestCase):
         _configure_floating_web_view(floating_view, floating_page)
 
         translucent = Qt.WidgetAttribute.WA_TranslucentBackground
-        self.assertEqual(main_view.attributes, [(translucent, True)])
-        self.assertEqual(main_page.color.alpha(), 0)
+        # Main window is opaque: it supplies the rounded clip so Chromium never
+        # composites transparent alpha over a GPU surface (avoids flicker).
+        self.assertEqual(main_view.attributes, [(translucent, False)])
+        self.assertEqual(main_page.color.alpha(), 255)
         main_page.web_settings.setAttribute.assert_called_once_with(
             QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True
         )
-        self.assertIn("background: transparent", main_view.style)
+        self.assertIn("background: #f7f9fc", main_view.style)
+        # Floating surface stays transparent to own its user-configurable opacity.
         self.assertEqual(floating_view.attributes, [(translucent, True)])
         self.assertEqual(floating_page.color.alpha(), 0)
         floating_page.web_settings.setAttribute.assert_not_called()
