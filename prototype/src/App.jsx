@@ -34,6 +34,7 @@ import { ActivityReporter, BookOrganizer, KokoroPanel, NOTE_COLORS, NoteEditor, 
 import { readerSelectionFromRange } from "./readerPosition.js";
 import BatchLibraryControls, { toggleLibrarySelection } from "./BatchLibraryControls.jsx";
 import LibraryBookCard from "./LibraryBookCard.jsx";
+import { bindLibraryScroll } from "./libraryScroll.js";
 import BookContextMenu from "./BookContextMenu.jsx";
 import BackupPanel from "./BackupPanel.jsx";
 import OfflineCachePanel from "./OfflineCachePanel.jsx";
@@ -413,36 +414,7 @@ const Library = memo(function Library({
   // compositor otherwise rasterizes newly mounted covers on every scroll row.
   const { totalRows, firstRow, endRow } = libraryWindow(visibleBooks.length, gridViewport, virtualLibrary);
   const renderedBooks = virtualLibrary ? visibleBooks.slice(firstRow * gridViewport.columns, Math.max(firstRow + 1, endRow) * gridViewport.columns) : visibleBooks;
-  useEffect(() => {
-    const page = pageRef.current;
-    let timer;
-    let scrolling = false;
-    const settle = () => {
-      scrolling = false;
-      delete page.dataset.scrolling;
-    };
-    const markScrolling = (event) => {
-      if (event.type === "wheel" && (event.ctrlKey || !event.deltaY)) return;
-      // Publish the scroll state for the desktop checks. No style depends on it:
-      // gating hover decoration on an ancestor attribute restyled the whole grid
-      // on every flip (measured 65-72 ms of style work per scroll case), which
-      // cost far more than the hover transitions it suppressed.
-      if (!scrolling) {
-        scrolling = true;
-        page.dataset.scrolling = "true";
-      }
-      clearTimeout(timer);
-      timer = setTimeout(settle, 180);
-    };
-    page.addEventListener("wheel", markScrolling, { passive: true });
-    page.addEventListener("scroll", markScrolling, { passive: true });
-    return () => {
-      clearTimeout(timer);
-      page.removeEventListener("wheel", markScrolling);
-      page.removeEventListener("scroll", markScrolling);
-      settle();
-    };
-  }, []);
+  useEffect(() => bindLibraryScroll(pageRef.current), []);
   useEffect(() => {
     if (typeof IntersectionObserver === "undefined") return;
     const cards = gridRef.current?.querySelectorAll(".book-card") || [];
